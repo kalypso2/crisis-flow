@@ -112,6 +112,16 @@ def _eonet_category_to_type(cat_id: str) -> str:
         "earthquakes": "earthquake",
     }.get(cat_id, "unknown")
 
+
+def _request_without_env_proxy(method: str, url: str, **kwargs):
+    """
+    Issue HTTP requests without inheriting proxy env vars.
+    This keeps public-source adapters working in proxied shells.
+    """
+    with requests.Session() as session:
+        session.trust_env = False
+        return session.request(method, url, **kwargs)
+
 ACLED_TYPE_MAP = {
     "Battles": "conflict",
     "Explosions/Remote violence": "conflict",
@@ -136,7 +146,7 @@ class USGSAdapter:
 
     def fetch(self) -> list[CrisisEvent]:
         try:
-            r = requests.get(self.URL, timeout=10)
+            r = _request_without_env_proxy("GET", self.URL, timeout=10)
             r.raise_for_status()
             features = r.json().get("features", [])
         except Exception as e:
@@ -192,7 +202,7 @@ class NOAAAdapter:
 
     def fetch(self) -> list[CrisisEvent]:
         try:
-            r = requests.get(self.URL, headers=self.HEADERS, timeout=10)
+            r = _request_without_env_proxy("GET", self.URL, headers=self.HEADERS, timeout=10)
             r.raise_for_status()
             features = r.json().get("features", [])
         except Exception as e:
@@ -259,7 +269,7 @@ class GDACSAdapter:
 
     def fetch(self) -> list[CrisisEvent]:
         try:
-            r = requests.get(self.URL, headers=self.HEADERS, timeout=15)
+            r = _request_without_env_proxy("GET", self.URL, headers=self.HEADERS, timeout=15)
             r.raise_for_status()
             items = r.json().get("features", [])
         except Exception as e:
@@ -302,7 +312,7 @@ class EONETAdapter:
 
     def fetch(self) -> list[CrisisEvent]:
         try:
-            r = requests.get(self.URL, timeout=10)
+            r = _request_without_env_proxy("GET", self.URL, timeout=10)
             r.raise_for_status()
             items = r.json().get("events", [])
         except Exception as e:

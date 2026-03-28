@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+from pathlib import Path
 import queue
 import sys
 import threading
@@ -54,13 +56,16 @@ CORS(app)
 
 # ── Shared state ──────────────────────────────────────────────────────────
 event_queue: queue.Queue[CrisisEvent] = queue.Queue(maxsize=1000)
-processed_events: list[dict] = []          # ring buffer, last 100
+processed_events: list[dict] = []          # ring buffer, last 2000
+quarantined_events: list[dict] = []        # ring buffer, last 500
 sse_subscribers: list[queue.Queue] = []    # one queue per SSE client
 _lock = threading.Lock()
 
 # Deduplication: track event IDs seen in the last 10 minutes
 _seen_ids: dict[str, float] = {}
 DEDUP_TTL = 600  # seconds
+QUARANTINE_LIMIT = 500
+PROCESSED_LIMIT = 500
 
 
 # ── Agent singletons ──────────────────────────────────────────────────────
@@ -208,7 +213,7 @@ def consumer_thread():
 
         with _lock:
             processed_events.append(result)
-            if len(processed_events) > 100:
+            if len(processed_events) > PROCESSED_LIMIT:
                 processed_events.pop(0)
             dead = []
             for q in sse_subscribers:
@@ -226,6 +231,45 @@ def consumer_thread():
 
 def _enqueue(event: CrisisEvent):
     """Deduplicate by event ID and push to the shared queue."""
+    def _coord_invalid_reason(ev: CrisisEvent) -> Optional[str]:
+        lat = ev.lat
+        lon = ev.lon
+        if lat is None or lon is None:
+            return "missing lat/lon"
+        if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+            return "non-numeric lat/lon"
+        if not math.isfinite(lat) or not math.isfinite(lon):
+            return "non-finite lat/lon"
+        if not (-90 <= lat <= 90):
+            return "latitude out of range"
+        if not (-180 <= lon <= 180):
+            return "longitude out of range"
+        if lat == 0 and lon == 0:
+            return "placeholder coordinates (0,0)"
+        return None
+
+    def _quarantine(ev: CrisisEvent, reason: str):
+        record = {
+            "id": ev.id,
+            "source": ev.source,
+            "type": ev.type,
+            "lat": ev.lat,
+            "lon": ev.lon,
+            "title": ev.title,
+            "timestamp": ev.timestamp.isoformat(),
+            "reason": reason,
+        }
+        with _lock:
+            quarantined_events.append(record)
+            if len(quarantined_events) > QUARANTINE_LIMIT:
+                quarantined_events.pop(0)
+        log.warning("Quarantined event %s from %s: %s", ev.id[:8], ev.source, reason)
+
+    invalid_reason = _coord_invalid_reason(event)
+    if invalid_reason:
+        _quarantine(event, invalid_reason)
+        return
+
     now = time.time()
     with _lock:
         # Evict stale IDs
@@ -280,6 +324,64 @@ def start_ingestion_threads():
     log.info("Started Twitter filtered stream thread")
 
 
+def ingest_static_acled_once():
+    """
+    Load static ACLED markers from data/acled_globe_markers.json and enqueue them
+    so they pass through the same agent pipeline as live sources.
+    """
+    path = Path(__file__).resolve().parent / "data" / "acled_globe_markers.json"
+    if not path.exists():
+        log.warning("ACLED static file missing: %s", path)
+        return
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            rows = json.load(f)
+    except Exception as exc:
+        log.error("Failed reading ACLED static data: %s", exc)
+        return
+
+    if not isinstance(rows, list):
+        log.error("ACLED static payload is not a list: %s", path)
+        return
+
+    enqueued = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            ts = row.get("timestamp")
+            if isinstance(ts, str):
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            else:
+                ts = datetime.now(timezone.utc)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+
+            event = CrisisEvent(
+                id=str(row.get("id") or f"ACLED-STATIC-{enqueued}"),
+                source="acled_static",
+                type=str(row.get("type") or "conflict"),
+                lat=float(row.get("lat") or 0.0),
+                lon=float(row.get("lon") or 0.0),
+                radius_km=float(row.get("radius_km") or 20.0),
+                location_name=str(row.get("admin1") or row.get("country") or ""),
+                severity=int(row.get("severity") or 3),
+                affected_population=int(row.get("affected_population") or 0),
+                timestamp=ts,
+                status=str(row.get("status") or "active"),
+                confidence=0.85,
+                title=str(row.get("title") or "ACLED static conflict event"),
+                raw=row,
+            )
+            _enqueue(event)
+            enqueued += 1
+        except Exception as exc:
+            log.warning("Skipping malformed ACLED static row: %s", exc)
+
+    log.info("ACLED static: enqueued %d events", enqueued)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Flask API
 # ═══════════════════════════════════════════════════════════════════════════
@@ -288,6 +390,34 @@ def start_ingestion_threads():
 def get_events():
     with _lock:
         return jsonify(list(processed_events))
+
+
+@app.route("/quarantine")
+def get_quarantine():
+    with _lock:
+        return jsonify(list(quarantined_events))
+
+
+@app.route("/acled-static")
+def get_acled_static():
+    """
+    Serve static ACLED conflict markers from data/acled_globe_markers.json.
+    Returns [] if the file is unavailable or malformed.
+    """
+    path = Path(__file__).resolve().parent / "data" / "acled_globe_markers.json"
+    if not path.exists():
+        log.warning("ACLED static file missing: %s", path)
+        return jsonify([])
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if not isinstance(payload, list):
+            log.error("ACLED static payload is not a list: %s", path)
+            return jsonify([])
+        return jsonify(payload)
+    except Exception as exc:
+        log.error("Failed reading ACLED static data: %s", exc)
+        return jsonify([])
 
 
 @app.route("/stream")
@@ -344,6 +474,7 @@ if __name__ == "__main__":
 
     threading.Thread(target=consumer_thread, name="consumer", daemon=True).start()
     start_ingestion_threads()
+    threading.Thread(target=ingest_static_acled_once, name="ingest-ACLED-static", daemon=True).start()
 
     log.info("API server starting on http://0.0.0.0:8000")
     app.run(host="0.0.0.0", port=8000, threaded=True, use_reloader=False)

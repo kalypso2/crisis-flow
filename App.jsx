@@ -1,4 +1,5 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
+import Globe from "react-globe.gl";
 
 /** Same host as the page + port 8000 so LAN / 127.0.0.1 / localhost all match the API. */
 function apiOrigin() {
@@ -211,8 +212,39 @@ function HealthPanel({ health }) {
   );
 }
 
-// ── Globe placeholder ─────────────────────────────────────────────────────
-function GlobePlaceholder({ events }) {
+// ── 3D globe ──────────────────────────────────────────────────────────────
+function GlobePanel({ events, onSelect }) {
+  const globeRef = useRef(null);
+
+  const pointsData = useMemo(() => {
+    return events
+      .filter((ev) => Number.isFinite(ev.lat) && Number.isFinite(ev.lon))
+      .map((ev) => ({
+        ...ev,
+        size: 0.08 + (ev.severity || 1) * 0.07,
+        color: SEV_COLOR[ev.severity] || "#888",
+      }));
+  }, [events]);
+
+  const arcsData = useMemo(() => {
+    return events
+      .filter((ev) => Array.isArray(ev.arc_source) && Array.isArray(ev.arc_dest))
+      .filter((ev) => ev.arc_source.length >= 2 && ev.arc_dest.length >= 2)
+      .map((ev) => ({
+        startLat: ev.arc_source[0],
+        startLng: ev.arc_source[1],
+        endLat: ev.arc_dest[0],
+        endLng: ev.arc_dest[1],
+        color: SEV_COLOR[ev.severity] || "#888",
+      }));
+  }, [events]);
+
+  useEffect(() => {
+    if (!globeRef.current) return;
+    globeRef.current.controls().autoRotate = true;
+    globeRef.current.controls().autoRotateSpeed = 0.25;
+  }, []);
+
   return (
     <div style={{
       flex: 1,
@@ -225,26 +257,51 @@ function GlobePlaceholder({ events }) {
       overflow: "hidden",
     }}>
       <div style={{ position: "absolute", top: 16, left: 20, fontSize: 11, color: "var(--color-text-tertiary)" }}>
-        3D globe — mount Globe.gl here (see README)
+        3D WebGL globe
       </div>
 
-      {/* Active event dots grid */}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, maxWidth: 400, justifyContent: "center" }}>
-        {events.slice(-24).map(ev => (
-          <div key={ev.id} title={ev.title} style={{
-            width: 10 + ev.severity * 3,
-            height: 10 + ev.severity * 3,
-            borderRadius: "50%",
-            background: SEV_COLOR[ev.severity] || "#888",
-            opacity: 0.8,
-            border: ev.consensus_flag ? "2px solid #EF9F27" : "none",
-          }} />
-        ))}
-        {events.length === 0 && (
-          <div style={{ color: "var(--color-text-tertiary)", fontSize: 13 }}>
-            Waiting for events…
-          </div>
-        )}
+      <div style={{ position: "absolute", inset: 0 }}>
+        <Globe
+          ref={globeRef}
+          width={window.innerWidth - 660}
+          height={window.innerHeight - 140}
+          backgroundColor="rgba(0,0,0,0)"
+          globeImageUrl="//unpkg.com/three-globe/example/img/earth-blue-marble.jpg"
+          bumpImageUrl="//unpkg.com/three-globe/example/img/earth-topology.png"
+          pointsData={pointsData}
+          pointLat="lat"
+          pointLng="lon"
+          pointColor="color"
+          pointAltitude="size"
+          pointRadius={0.25}
+          pointResolution={8}
+          pointsMerge={false}
+          onPointClick={(ev) => onSelect?.(ev)}
+          arcsData={arcsData}
+          arcColor={(a) => a.color}
+          arcStroke={0.6}
+          arcDashLength={0.5}
+          arcDashGap={1}
+          arcDashAnimateTime={1800}
+        />
+      </div>
+
+      {events.length === 0 && (
+        <div style={{
+          position: "absolute",
+          top: "50%",
+          left: "50%",
+          transform: "translate(-50%, -50%)",
+          color: "var(--color-text-tertiary)",
+          fontSize: 13,
+          pointerEvents: "none",
+        }}>
+          Waiting for events...
+        </div>
+      )}
+
+      <div style={{ position: "absolute", top: 16, right: 20, fontSize: 11, color: "var(--color-text-tertiary)" }}>
+        Events: {pointsData.length} · Arcs: {arcsData.length}
       </div>
 
       <div style={{ position: "absolute", bottom: 16, left: 20, display: "flex", gap: 14 }}>
@@ -322,7 +379,7 @@ export default function App() {
         if (!ev || typeof ev.id !== "string") return;
         setEvents((prev) => {
           const without = prev.filter((x) => x.id !== ev.id);
-          return [ev, ...without].slice(0, 100);
+          return [ev, ...without].slice(0, 500);
         });
       } catch {
         /* ignore malformed SSE payloads */
@@ -425,7 +482,7 @@ export default function App() {
 
         {/* Globe + detail */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-          <GlobePlaceholder events={filtered} />
+          <GlobePanel events={filtered} onSelect={setSelected} />
         </div>
 
         {/* Detail panel */}

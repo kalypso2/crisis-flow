@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from dotenv import load_dotenv
 load_dotenv("config/keys.env")
 
-from flask import Flask, Response, jsonify
+from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 
 from schema import CrisisEvent
@@ -44,6 +44,7 @@ from agents import (
     AllocationAgent, CommunicationAgent,
 )
 from consensus import ConsensusEngine, is_degraded
+import snowflake_store
 
 logging.basicConfig(
     level=logging.INFO,
@@ -224,6 +225,11 @@ def consumer_thread():
             for q in dead:
                 sse_subscribers.remove(q)
 
+        try:
+            snowflake_store.store_event(result)
+        except Exception as exc:
+            log.warning("Snowflake store failed (non-fatal): %s", exc)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Ingestion threads — one per source
@@ -300,11 +306,11 @@ def poll_loop(adapter, interval_s: int):
 
 def start_ingestion_threads():
     sources = [
-        (USGSAdapter(),  30,  "USGS"),
-        (NOAAAdapter(),  60,  "NOAA"),
-        (GDACSAdapter(), 300, "GDACS"),
-        (EONETAdapter(), 60,  "EONET"),
-        (ACLEDAdapter(), 300, "ACLED"),
+        (USGSAdapter(),  120, "USGS"),
+        (NOAAAdapter(),  300, "NOAA"),
+        (GDACSAdapter(), 600, "GDACS"),
+        (EONETAdapter(), 300, "EONET"),
+        (ACLEDAdapter(), 900, "ACLED"),
     ]
     for adapter, interval, name in sources:
         t = threading.Thread(
@@ -388,8 +394,18 @@ def ingest_static_acled_once():
 
 @app.route("/events")
 def get_events():
-    with _lock:
-        return jsonify(list(processed_events))
+    """All events across all Snowflake tables, combined."""
+    try:
+        all_events = []
+        for event_type in snowflake_store.TYPE_TO_TABLE:
+            rows = snowflake_store.get_table(event_type, limit=300)
+            for r in rows:
+                r["type"] = event_type
+            all_events.extend(rows)
+        return jsonify(all_events)
+    except Exception:
+        with _lock:
+            return jsonify(list(processed_events))
 
 
 @app.route("/quarantine")
@@ -400,24 +416,19 @@ def get_quarantine():
 
 @app.route("/acled-static")
 def get_acled_static():
-    """
-    Serve static ACLED conflict markers from data/acled_globe_markers.json.
-    Returns [] if the file is unavailable or malformed.
-    """
-    path = Path(__file__).resolve().parent / "data" / "acled_globe_markers.json"
-    if not path.exists():
-        log.warning("ACLED static file missing: %s", path)
-        return jsonify([])
+    """Serve ACLED conflict zones from Snowflake CONFLICTS table."""
     try:
-        with path.open("r", encoding="utf-8") as f:
-            payload = json.load(f)
-        if not isinstance(payload, list):
-            log.error("ACLED static payload is not a list: %s", path)
-            return jsonify([])
-        return jsonify(payload)
+        return jsonify(snowflake_store.get_conflicts(min_severity=1, limit=300))
     except Exception as exc:
-        log.error("Failed reading ACLED static data: %s", exc)
-        return jsonify([])
+        log.error("Snowflake ACLED query failed, falling back to JSON: %s", exc)
+        path = Path(__file__).resolve().parent / "data" / "acled_globe_markers.json"
+        if not path.exists():
+            return jsonify([])
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                return jsonify(json.load(f))
+        except Exception:
+            return jsonify([])
 
 
 @app.route("/stream")
@@ -428,12 +439,8 @@ def sse_stream():
         sse_subscribers.append(client_q)
 
     def generate():
-        # Send current snapshot on connect
-        with _lock:
-            snapshot = list(processed_events[-10:])
-        for ev in snapshot:
-            yield f"data: {json.dumps(ev)}\n\n"
-
+        # No initial snapshot — the frontend fetches via REST.
+        # SSE only streams genuinely new events as they're processed.
         while True:
             try:
                 ev = client_q.get(timeout=30)
@@ -443,6 +450,23 @@ def sse_stream():
 
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.route("/snowflake/summary")
+def sf_summary():
+    """Row counts for every event-type table in Snowflake."""
+    return jsonify(snowflake_store.get_all_tables_summary())
+
+
+@app.route("/snowflake/<event_type>")
+def sf_by_type(event_type):
+    """Query a specific event-type table. e.g. /snowflake/earthquake"""
+    if event_type == "conflict":
+        min_sev = int(request.args.get("min_severity", 1))
+        limit = min(int(request.args.get("limit", 50)), 100)
+        return jsonify(snowflake_store.get_conflicts(min_sev, limit))
+    limit = min(int(request.args.get("limit", 50)), 100)
+    return jsonify(snowflake_store.get_table(event_type, limit))
 
 
 @app.route("/health")
@@ -474,7 +498,6 @@ if __name__ == "__main__":
 
     threading.Thread(target=consumer_thread, name="consumer", daemon=True).start()
     start_ingestion_threads()
-    threading.Thread(target=ingest_static_acled_once, name="ingest-ACLED-static", daemon=True).start()
 
     log.info("API server starting on http://0.0.0.0:8000")
     app.run(host="0.0.0.0", port=8000, threaded=True, use_reloader=False)

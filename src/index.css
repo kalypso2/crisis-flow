@@ -8,6 +8,16 @@
   --color-text-primary: #e6edf3;
   --color-text-secondary: #b4c0cc;
   --color-text-tertiary: #8b98a7;
+  /* Semantic tokens referenced in App.jsx (were missing — invalid var() drops whole declaration) */
+  --color-background-info: #152535;
+  --color-text-info: #6cb3f5;
+  --color-border-info: #2a4a6a;
+  --color-background-success: #12261c;
+  --color-text-success: #4ade80;
+  --color-border-success: #1f4d32;
+  --color-background-danger: #2a1515;
+  --color-text-danger: #f87171;
+  --color-border-danger: #5c2626;
 }
 
 * {

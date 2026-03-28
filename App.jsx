@@ -1,7 +1,15 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo } from "react";
 
-const SSE_URL = "http://localhost:8000/stream";
-const HEALTH_URL = "http://localhost:8000/health";
+/** Same host as the page + port 8000 so LAN / 127.0.0.1 / localhost all match the API. */
+function apiOrigin() {
+  const fromEnv = import.meta.env.VITE_API_ORIGIN;
+  if (fromEnv) return fromEnv.replace(/\/$/, "");
+  if (typeof window !== "undefined") {
+    const { protocol, hostname } = window.location;
+    return `${protocol}//${hostname}:8000`;
+  }
+  return "http://127.0.0.1:8000";
+}
 
 const SEV_COLOR = {
   1: "#378ADD", 2: "#1D9E75", 3: "#EF9F27", 4: "#D85A30", 5: "#E24B4A",
@@ -299,29 +307,38 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [filter, setFilter] = useState("all");
 
+  const base = useMemo(() => apiOrigin(), []);
+  const sseUrl = `${base}/stream`;
+  const healthUrl = `${base}/health`;
+
   // SSE connection
   useEffect(() => {
-    const es = new EventSource(SSE_URL);
+    const es = new EventSource(sseUrl);
     es.onopen = () => setConnected(true);
     es.onerror = () => setConnected(false);
     es.onmessage = (e) => {
-      const ev = JSON.parse(e.data);
-      setEvents(prev => {
-        const without = prev.filter(x => x.id !== ev.id);
-        return [ev, ...without].slice(0, 100);
-      });
+      try {
+        const ev = JSON.parse(e.data);
+        if (!ev || typeof ev.id !== "string") return;
+        setEvents((prev) => {
+          const without = prev.filter((x) => x.id !== ev.id);
+          return [ev, ...without].slice(0, 100);
+        });
+      } catch {
+        /* ignore malformed SSE payloads */
+      }
     };
     return () => es.close();
-  }, []);
+  }, [sseUrl]);
 
   // Health polling
   useEffect(() => {
     const poll = () =>
-      fetch(HEALTH_URL).then(r => r.json()).then(setHealth).catch(() => {});
+      fetch(healthUrl).then((r) => r.json()).then(setHealth).catch(() => {});
     poll();
     const id = setInterval(poll, 10000);
     return () => clearInterval(id);
-  }, []);
+  }, [healthUrl]);
 
   const filtered = filter === "all"
     ? events

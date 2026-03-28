@@ -4,3 +4,4 @@ python-dotenv>=1.0
 requests>=2.31
 snowflake-connector-python[pandas]>=3.6
 pandas>=2.0
+google-genai>=1.0.0

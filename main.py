@@ -29,6 +29,7 @@ from typing import Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from dotenv import load_dotenv
+load_dotenv("config/keys.env")
 load_dotenv()
 
 from flask import Flask, Response, jsonify, request

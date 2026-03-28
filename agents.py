@@ -468,7 +468,17 @@ class AllocationAgent:
 # Agent 5 — Communication
 # ═══════════════════════════════════════════════════════════════════════════
 
-SEVERITY_COLORS = {1: "#378ADD", 2: "#1D9E75", 3: "#EF9F27", 4: "#D85A30", 5: "#E24B4A"}
+TYPE_COLORS = {
+    "earthquake": "#A0522D",
+    "flood":      "#2196F3",
+    "cyclone":    "#9C27B0",
+    "volcano":    "#FF5722",
+    "wildfire":   "#FF9800",
+    "drought":    "#D4A017",
+    "storm":      "#78909C",
+    "conflict":   "#E24B4A",
+    "iceberg":    "#00BCD4",
+}
 SEVERITY_LABELS = {1: "LOW", 2: "MODERATE", 3: "HIGH", 4: "CRITICAL", 5: "EXTREME"}
 
 
@@ -483,7 +493,7 @@ class CommunicationAgent:
        From Geneva Hub — ETA 4h 20m. Est. 280,000 people affected."
 
     Also emits globe rendering params:
-      globe_color  — hex colour for the pulsing marker (severity-mapped)
+      globe_color  — hex colour for the pulsing marker (type-mapped)
       arc_source   — (lat, lon) of the depot
       arc_dest     — (lat, lon) of the event
 
@@ -520,7 +530,7 @@ class CommunicationAgent:
         return CommunicationResult(
             agent_name="communication",
             summary=summary,
-            globe_color=SEVERITY_COLORS.get(severity.score, "#888780"),
+            globe_color=TYPE_COLORS.get(classification.event_type, "#888780"),
             arc_source=(allocation.depot_lat, allocation.depot_lon),
             arc_dest=(event.lat, event.lon),
             confidence=0.95,

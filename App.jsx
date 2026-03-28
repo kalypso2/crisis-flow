@@ -18,6 +18,17 @@ const SEV_COLOR = {
 const SEV_LABEL = {
   1: "Low", 2: "Moderate", 3: "High", 4: "Critical", 5: "Extreme",
 };
+const TYPE_COLOR = {
+  earthquake: "#A0522D",
+  flood:      "#2196F3",
+  cyclone:    "#9C27B0",
+  volcano:    "#FF5722",
+  wildfire:   "#FF9800",
+  drought:    "#D4A017",
+  storm:      "#78909C",
+  conflict:   "#E24B4A",
+  iceberg:    "#00BCD4",
+};
 const TYPE_EMOJI = {
   earthquake: "🌍", flood: "🌊", cyclone: "🌀", volcano: "🌋",
   wildfire: "🔥", drought: "☀️", storm: "⛈️", conflict: "⚠️", iceberg: "🧊",
@@ -213,18 +224,21 @@ function HealthPanel({ health }) {
 }
 
 // ── 3D globe ──────────────────────────────────────────────────────────────
+function dominantType(hexBin) {
+  const counts = {};
+  hexBin.points.forEach(p => {
+    counts[p.type] = (counts[p.type] || 0) + 1;
+  });
+  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  return sorted.length > 0 ? sorted[0][0] : "unknown";
+}
+
 function GlobePanel({ events, onSelect }) {
   const globeRef = useRef(null);
 
-  const pointsData = useMemo(() => {
-    return events
-      .filter((ev) => Number.isFinite(ev.lat) && Number.isFinite(ev.lon))
-      .map((ev) => ({
-        ...ev,
-        size: 0.08 + (ev.severity || 1) * 0.07,
-        color: SEV_COLOR[ev.severity] || "#888",
-      }));
-  }, [events]);
+  const validEvents = useMemo(() =>
+    events.filter(ev => Number.isFinite(ev.lat) && Number.isFinite(ev.lon)),
+  [events]);
 
   const arcsData = useMemo(() => {
     return events
@@ -235,7 +249,7 @@ function GlobePanel({ events, onSelect }) {
         startLng: ev.arc_source[1],
         endLat: ev.arc_dest[0],
         endLng: ev.arc_dest[1],
-        color: SEV_COLOR[ev.severity] || "#888",
+        color: TYPE_COLOR[ev.type] || "#888888",
       }));
   }, [events]);
 
@@ -257,7 +271,7 @@ function GlobePanel({ events, onSelect }) {
       overflow: "hidden",
     }}>
       <div style={{ position: "absolute", top: 16, left: 20, fontSize: 11, color: "var(--color-text-tertiary)" }}>
-        3D WebGL globe
+        3D WebGL heatmap
       </div>
 
       <div style={{ position: "absolute", inset: 0 }}>
@@ -268,17 +282,18 @@ function GlobePanel({ events, onSelect }) {
           backgroundColor="rgba(0,0,0,0)"
           globeImageUrl="//unpkg.com/three-globe/example/img/earth-blue-marble.jpg"
           bumpImageUrl="//unpkg.com/three-globe/example/img/earth-topology.png"
-          pointsData={pointsData}
-          pointLat="lat"
-          pointLng="lon"
-          pointColor="color"
-          pointAltitude="size"
-          pointRadius={0.25}
-          pointResolution={8}
-          pointsMerge={false}
-          onPointClick={(ev) => onSelect?.(ev)}
+          hexBinPointsData={validEvents}
+          hexBinPointLat="lat"
+          hexBinPointLng={d => d.lon}
+          hexBinPointWeight={d => d.severity || 1}
+          hexBinResolution={3}
+          hexTopColor={d => TYPE_COLOR[dominantType(d)] || "#888888"}
+          hexSideColor={d => (TYPE_COLOR[dominantType(d)] || "#888888") + "99"}
+          hexAltitude={d => d.sumWeight * 0.008}
+          hexBinMerge={false}
+          onHexClick={hex => onSelect?.(hex.points[0])}
           arcsData={arcsData}
-          arcColor={(a) => a.color}
+          arcColor={a => a.color}
           arcStroke={0.6}
           arcDashLength={0.5}
           arcDashGap={1}
@@ -301,14 +316,14 @@ function GlobePanel({ events, onSelect }) {
       )}
 
       <div style={{ position: "absolute", top: 16, right: 20, fontSize: 11, color: "var(--color-text-tertiary)" }}>
-        Events: {pointsData.length} · Arcs: {arcsData.length}
+        Events: {validEvents.length} · Arcs: {arcsData.length}
       </div>
 
-      <div style={{ position: "absolute", bottom: 16, left: 20, display: "flex", gap: 14 }}>
-        {[1,2,3,4,5].map(s => (
-          <div key={s} style={{ display: "flex", alignItems: "center", gap: 5 }}>
-            <div style={{ width: 10, height: 10, borderRadius: "50%", background: SEV_COLOR[s] }} />
-            <span style={{ fontSize: 10, color: "var(--color-text-tertiary)" }}>{SEV_LABEL[s]}</span>
+      <div style={{ position: "absolute", bottom: 16, left: 20, display: "flex", flexWrap: "wrap", gap: 10, maxWidth: "65%" }}>
+        {Object.entries(TYPE_COLOR).map(([type, color]) => (
+          <div key={type} style={{ display: "flex", alignItems: "center", gap: 5 }}>
+            <div style={{ width: 10, height: 10, borderRadius: "50%", background: color }} />
+            <span style={{ fontSize: 10, color: "var(--color-text-tertiary)" }}>{type}</span>
           </div>
         ))}
       </div>

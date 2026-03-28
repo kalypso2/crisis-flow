@@ -29,7 +29,7 @@ from typing import Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from dotenv import load_dotenv
-load_dotenv("config/keys.env")
+load_dotenv()
 
 from flask import Flask, Response, jsonify
 from flask_cors import CORS
@@ -326,10 +326,28 @@ def start_ingestion_threads():
 
 def ingest_static_acled_once():
     """
-    Load static ACLED markers from data/acled_globe_markers.json and enqueue them
-    so they pass through the same agent pipeline as live sources.
+    Load static ACLED markers and enqueue them through the full agent pipeline.
+
+    Prefers data/acled_globe_markers_refined.json (timestamp-corrected by
+    timestamp_agent.py) over the raw data/acled_globe_markers.json.
+    Run `python3 timestamp_agent.py` once before starting the app to produce
+    the refined file with accurate per-incident timestamps.
     """
-    path = Path(__file__).resolve().parent / "data" / "acled_globe_markers.json"
+    base = Path(__file__).resolve().parent / "data"
+    refined_path  = base / "acled_globe_markers_refined.json"
+    original_path = base / "acled_globe_markers.json"
+
+    if refined_path.exists():
+        path = refined_path
+        log.info("ACLED static: using timestamp-refined file (%s)", refined_path.name)
+    else:
+        path = original_path
+        log.info(
+            "ACLED static: refined file not found — using original (%s). "
+            "Run `python3 timestamp_agent.py` to generate accurate timestamps.",
+            original_path.name,
+        )
+
     if not path.exists():
         log.warning("ACLED static file missing: %s", path)
         return

@@ -21,10 +21,15 @@ env/
 
 # Environment and secrets
 .env
-.env.*
+.env.local
+.env.*.local
 config/keys.env
 
 # OS/editor noise
 .DS_Store
 .idea/
 .vscode/
+
+# Timestamp agent outputs (generated, can be large)
+data/acled_globe_markers_refined.json
+data/timestamp_cache.json

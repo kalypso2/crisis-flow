@@ -431,27 +431,30 @@ export default function App() {
   const base = useMemo(() => apiOrigin(), []);
   const healthUrl = `${base}/health`;
 
-  // Fetch events from the selected Snowflake table
+  // Fetch all events once; filtering is done client-side
   useEffect(() => {
     let cancelled = false;
-    const url = filter === "all"
-      ? `${base}/events`
-      : `${base}/snowflake/${filter}`;
 
-    fetch(url)
+    fetch(`${base}/events`)
       .then((r) => r.json())
       .then((data) => {
         if (cancelled) return;
-        const normalized = (data || []).map((r) => normalizeRow(r, filter === "all" ? r.type || r.TYPE : filter));
+        const normalized = (data || []).map((r) => normalizeRow(r, r.type || r.TYPE || "unknown"));
         setEvents(normalized);
         setConnected(true);
       })
       .catch(() => {
-        if (!cancelled) setConnected(false);
+        if (cancelled) return;
+        setConnected(false);
       });
 
     return () => { cancelled = true; };
-  }, [base, filter]);
+  }, [base]);
+
+  // Client-side filter — instant, no extra network round-trip
+  const displayedEvents = useMemo(() =>
+    filter === "all" ? events : events.filter(ev => ev.type === filter),
+  [events, filter]);
 
   // Fetch Snowflake table counts for tab badges
   useEffect(() => {
@@ -473,8 +476,6 @@ export default function App() {
     const id = setInterval(poll, 10000);
     return () => clearInterval(id);
   }, [healthUrl]);
-
-  const filtered = events;
 
   return (
     <div style={{
@@ -541,12 +542,12 @@ export default function App() {
           display: "flex", flexDirection: "column", overflow: "hidden",
         }}>
           <div style={{ flex: 1, overflowY: "auto" }}>
-            {filtered.length === 0 && (
+            {displayedEvents.length === 0 && (
               <div style={{ padding: 20, fontSize: 13, color: "var(--color-text-tertiary)", textAlign: "center" }}>
-                No events yet
+                {events.length === 0 ? "No events yet" : `No ${filter} events`}
               </div>
             )}
-            {filtered.map(ev => (
+            {displayedEvents.map(ev => (
               <EventCard
                 key={ev.id}
                 ev={ev}
@@ -560,7 +561,7 @@ export default function App() {
 
         {/* Globe + detail */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-          <GlobePanel events={filtered} onSelect={setSelected} />
+          <GlobePanel events={displayedEvents} onSelect={setSelected} />
         </div>
 
         {/* Detail panel */}

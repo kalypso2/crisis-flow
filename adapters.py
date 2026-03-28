@@ -68,6 +68,7 @@ SOURCE OVERVIEW
 
 from __future__ import annotations
 
+import math
 import os
 import time
 import logging
@@ -176,6 +177,74 @@ class USGSAdapter:
         return events
 
 
+# ── NOAA US state centroids (fallback for null-geometry alerts) ────────────
+# Sourced from geographic centre of each state.
+_US_STATE_CENTROIDS: dict[str, tuple[float, float]] = {
+    "AL": (32.80,  -86.79), "AK": (64.20, -153.37), "AZ": (34.30, -111.09),
+    "AR": (34.75,  -92.13), "CA": (37.15, -119.54), "CO": (39.00, -105.55),
+    "CT": (41.60,  -72.70), "DE": (39.00,  -75.50), "FL": (27.99,  -81.76),
+    "GA": (32.64,  -83.44), "HI": (20.24, -156.36), "ID": (44.27, -114.61),
+    "IL": (40.35,  -88.99), "IN": (39.85,  -86.26), "IA": (42.01,  -93.21),
+    "KS": (38.53,  -96.73), "KY": (37.64,  -84.87), "LA": (30.39,  -92.33),
+    "ME": (44.69,  -69.38), "MD": (39.06,  -76.80), "MA": (42.26,  -71.81),
+    "MI": (44.18,  -84.47), "MN": (46.39,  -94.63), "MS": (32.74,  -89.67),
+    "MO": (38.46,  -92.29), "MT": (46.88, -110.36), "NE": (41.49,  -99.90),
+    "NV": (39.33, -116.62), "NH": (43.68,  -71.58), "NJ": (40.06,  -74.41),
+    "NM": (34.31, -106.02), "NY": (42.95,  -75.52), "NC": (35.54,  -79.39),
+    "ND": (47.45, -100.47), "OH": (40.29,  -82.79), "OK": (35.59,  -97.49),
+    "OR": (43.94, -120.56), "PA": (40.87,  -77.79), "RI": (41.68,  -71.56),
+    "SC": (33.90,  -80.90), "SD": (44.44,  -99.88), "TN": (35.85,  -86.35),
+    "TX": (31.47,  -99.33), "UT": (39.32, -111.09), "VT": (44.07,  -72.67),
+    "VA": (37.51,  -78.86), "WA": (47.38, -120.45), "WV": (38.64,  -80.62),
+    "WI": (44.27,  -89.62), "WY": (42.96, -107.55), "DC": (38.91,  -77.01),
+    "PR": (18.22,  -66.59), "GU": (13.44,  144.79), "VI": (17.73,  -64.73),
+}
+
+def _noaa_state_centroid(area_desc: str) -> tuple[float, float] | None:
+    """
+    Extract a US state abbreviation from NOAA's areaDesc and return its centroid.
+    areaDesc examples: "Central Oklahoma", "Western TX; Eastern NM", "Lake Erie"
+    """
+    tokens = area_desc.upper().replace(",", " ").replace(";", " ").split()
+    for token in tokens:
+        if token in _US_STATE_CENTROIDS:
+            return _US_STATE_CENTROIDS[token]
+    return None
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    R = 6371.0
+    φ1, φ2 = math.radians(lat1), math.radians(lat2)
+    dφ = math.radians(lat2 - lat1)
+    dλ = math.radians(lon2 - lon1)
+    a = math.sin(dφ / 2) ** 2 + math.cos(φ1) * math.cos(φ2) * math.sin(dλ / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _split_multipolygon(
+    mp_coords: list,
+    max_splits: int = 5,
+    min_dist_km: float = 200.0,
+) -> list[tuple[float, float]]:
+    """
+    Given MultiPolygon coordinates, return up to max_splits centroids that are
+    all at least min_dist_km apart from each other (greedy selection in order).
+    """
+    selected: list[tuple[float, float]] = []
+    for polygon in mp_coords:
+        if len(selected) >= max_splits:
+            break
+        ring = polygon[0]  # outer ring
+        if not ring:
+            continue
+        lat = sum(c[1] for c in ring) / len(ring)
+        lon = sum(c[0] for c in ring) / len(ring)
+        if all(_haversine_km(lat, lon, s_lat, s_lon) >= min_dist_km
+               for s_lat, s_lon in selected):
+            selected.append((lat, lon))
+    return selected
+
+
 # ── NOAA Weather Alerts ───────────────────────────────────────────────────
 
 class NOAAAdapter:
@@ -215,35 +284,69 @@ class NOAAAdapter:
             geom = f.get("geometry") or {}
             coords = geom.get("coordinates") or []
 
-            # NOAA polygons can be complex; use centroid approximation
-            lat, lon = 0.0, 0.0
-            if coords and geom.get("type") == "Polygon":
-                ring = coords[0]
-                lat = sum(c[1] for c in ring) / len(ring)
-                lon = sum(c[0] for c in ring) / len(ring)
-
             event_name = p.get("event", "Weather Alert")
             ev_type = self.NOAA_TYPE_MAP.get(event_name, "storm")
             sev_str = p.get("severity", "Moderate")
             urgency = p.get("urgency", "")
-
             severity = _noaa_severity_to_int(sev_str)
             if urgency == "Immediate":
                 severity = min(5, severity + 1)
+            area_desc = p.get("areaDesc", "")
 
-            events.append(CrisisEvent(
-                source="noaa",
-                type=ev_type,
-                lat=lat,
-                lon=lon,
-                radius_km=50.0,
-                location_name=p.get("areaDesc", ""),
-                severity=severity,
-                timestamp=_utcnow(),
-                title=f"{event_name} — {p.get('areaDesc', '')}",
-                confidence=0.90,
-                raw=p,
-            ))
+            # ── Coordinate extraction ─────────────────────────────────────
+            geom_type = geom.get("type")
+            lat, lon = 0.0, 0.0
+            split_centroids: list[tuple[float, float]] = []
+
+            if coords and geom_type == "Polygon":
+                ring = coords[0]
+                lat = sum(c[1] for c in ring) / len(ring)
+                lon = sum(c[0] for c in ring) / len(ring)
+
+            elif coords and geom_type == "MultiPolygon":
+                candidates = _split_multipolygon(coords)  # ≤5, ≥200 km apart
+                if len(candidates) > 1:
+                    split_centroids = candidates  # emit one event per centroid
+                elif candidates:
+                    lat, lon = candidates[0]  # all polygons are close — single point
+
+            if not split_centroids and lat == 0.0 and lon == 0.0:
+                # Null / unrecognised geometry — fall back to state centroid
+                centroid = _noaa_state_centroid(area_desc)
+                if centroid:
+                    lat, lon = centroid
+
+            # ── Event creation ────────────────────────────────────────────
+            if split_centroids:
+                total = len(split_centroids)
+                for idx, (p_lat, p_lon) in enumerate(split_centroids, start=1):
+                    events.append(CrisisEvent(
+                        source="noaa",
+                        type=ev_type,
+                        lat=p_lat,
+                        lon=p_lon,
+                        radius_km=50.0,
+                        location_name=area_desc,
+                        severity=severity,
+                        timestamp=_utcnow(),
+                        title=f"{event_name} — {area_desc} ({idx} of {total})",
+                        confidence=0.90,
+                        raw=p,
+                    ))
+            else:
+                events.append(CrisisEvent(
+                    source="noaa",
+                    type=ev_type,
+                    lat=lat,
+                    lon=lon,
+                    radius_km=50.0,
+                    location_name=area_desc,
+                    severity=severity,
+                    timestamp=_utcnow(),
+                    title=f"{event_name} — {area_desc}",
+                    confidence=0.90,
+                    raw=p,
+                ))
         log.info("NOAA: fetched %d alerts", len(events))
         return events
 

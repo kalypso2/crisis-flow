@@ -372,36 +372,98 @@ function StatsBar({ events }) {
 // Main App
 // ═══════════════════════════════════════════════════════════════════════════
 
+const EVENT_TYPES = [
+  "all", "conflict", "earthquake", "flood", "storm",
+  "wildfire", "cyclone", "volcano", "drought", "iceberg",
+];
+
+function tryParseJson(val, fallback) {
+  if (Array.isArray(val) || (val && typeof val === "object")) return val;
+  if (typeof val === "string") {
+    try { return JSON.parse(val); } catch { return fallback; }
+  }
+  return fallback;
+}
+
+function normalizeRow(row, fallbackType) {
+  const lower = {};
+  for (const [k, v] of Object.entries(row)) {
+    lower[k.toLowerCase()] = v;
+  }
+  const lat = parseFloat(lower.lat) || 0;
+  const lon = parseFloat(lower.lon) || 0;
+  return {
+    id: lower.id || "",
+    source: lower.source || "",
+    type: lower.type || fallbackType,
+    title: lower.title || "",
+    lat,
+    lon,
+    radius_km: parseFloat(lower.radius_km) || 0,
+    location_name: lower.location_name || "",
+    severity: parseInt(lower.severity) || 1,
+    affected_population: parseInt(lower.affected_population) || 0,
+    timestamp: lower.timestamp || "",
+    status: lower.status || "active",
+    confidence: parseFloat(lower.confidence) || 0.5,
+    action_summary: lower.action_summary || "",
+    consensus_flag: lower.consensus_flag || "",
+    domain_tags: tryParseJson(lower.domain_tags, []),
+    allocation: tryParseJson(lower.allocation, {}),
+    globe_color: lower.globe_color || "#888780",
+    arc_source: tryParseJson(lower.arc_source, [0, 0]),
+    arc_dest: tryParseJson(lower.arc_dest, [lat, lon]),
+    country: lower.country || "",
+    admin1: lower.admin1 || "",
+    total_events: lower.total_events,
+    total_fatalities: lower.total_fatalities,
+  };
+}
+
 export default function App() {
   const [events, setEvents] = useState([]);
   const [selected, setSelected] = useState(null);
   const [health, setHealth] = useState(null);
   const [connected, setConnected] = useState(false);
   const [filter, setFilter] = useState("all");
+  const [tableCounts, setTableCounts] = useState({});
 
   const base = useMemo(() => apiOrigin(), []);
-  const sseUrl = `${base}/stream`;
   const healthUrl = `${base}/health`;
 
-  // SSE connection
+  // Fetch events from the selected Snowflake table
   useEffect(() => {
-    const es = new EventSource(sseUrl);
-    es.onopen = () => setConnected(true);
-    es.onerror = () => setConnected(false);
-    es.onmessage = (e) => {
-      try {
-        const ev = JSON.parse(e.data);
-        if (!ev || typeof ev.id !== "string") return;
-        setEvents((prev) => {
-          const without = prev.filter((x) => x.id !== ev.id);
-          return [ev, ...without].slice(0, 500);
-        });
-      } catch {
-        /* ignore malformed SSE payloads */
-      }
-    };
-    return () => es.close();
-  }, [sseUrl]);
+    let cancelled = false;
+    const url = filter === "all"
+      ? `${base}/events`
+      : `${base}/snowflake/${filter}`;
+
+    fetch(url)
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        const normalized = (data || []).map((r) => normalizeRow(r, filter === "all" ? r.type || r.TYPE : filter));
+        setEvents(normalized);
+        setConnected(true);
+      })
+      .catch(() => {
+        if (!cancelled) setConnected(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [base, filter]);
+
+  // Fetch Snowflake table counts for tab badges
+  useEffect(() => {
+    const poll = () =>
+      fetch(`${base}/snowflake/summary`)
+        .then((r) => r.json())
+        .then(setTableCounts)
+        .catch(() => {});
+    poll();
+    const id = setInterval(poll, 30000);
+    return () => clearInterval(id);
+  }, [base]);
 
   // Health polling
   useEffect(() => {
@@ -412,15 +474,7 @@ export default function App() {
     return () => clearInterval(id);
   }, [healthUrl]);
 
-  const filtered = filter === "all"
-    ? events
-    : filter === "conflict"
-    ? events.filter(e => e.type === "conflict")
-    : filter === "critical"
-    ? events.filter(e => e.severity >= 4)
-    : filter === "flagged"
-    ? events.filter(e => e.consensus_flag)
-    : events.filter(e => e.type === filter);
+  const filtered = events;
 
   return (
     <div style={{
@@ -451,23 +505,32 @@ export default function App() {
 
       <StatsBar events={events} />
 
-      {/* Filter bar */}
+      {/* Filter bar — one tab per Snowflake table */}
       <div style={{
         display: "flex", gap: 0, padding: "6px 14px",
         borderBottom: "0.5px solid var(--color-border-tertiary)",
         overflowX: "auto",
       }}>
-        {["all","critical","conflict","flagged","earthquake","flood","storm","wildfire","cyclone"].map(f => (
-          <button key={f} onClick={() => setFilter(f)} style={{
-            padding: "4px 12px", fontSize: 11, border: "none", cursor: "pointer",
-            borderRadius: 4, marginRight: 4,
-            background: filter === f ? "var(--color-background-info)" : "transparent",
-            color: filter === f ? "var(--color-text-info)" : "var(--color-text-tertiary)",
-            fontWeight: filter === f ? 500 : 400,
-          }}>
-            {f}
-          </button>
-        ))}
+        {EVENT_TYPES.map(f => {
+          const count = f === "all"
+            ? Object.values(tableCounts).reduce((a, b) => a + b, 0)
+            : (tableCounts[f] || 0);
+          return (
+            <button key={f} onClick={() => setFilter(f)} style={{
+              padding: "4px 12px", fontSize: 11, border: "none", cursor: "pointer",
+              borderRadius: 4, marginRight: 4,
+              background: filter === f ? "var(--color-background-info)" : "transparent",
+              color: filter === f ? "var(--color-text-info)" : "var(--color-text-tertiary)",
+              fontWeight: filter === f ? 500 : 400,
+              display: "flex", alignItems: "center", gap: 4,
+            }}>
+              {TYPE_EMOJI[f] || ""} {f}
+              {count > 0 && (
+                <span style={{ fontSize: 9, opacity: 0.7 }}>({count})</span>
+              )}
+            </button>
+          );
+        })}
       </div>
 
       {/* Main layout */}

@@ -38,7 +38,6 @@ class CrisisEvent:
     status: str = "active"    # active | resolved
 
     # ── Agent pipeline outputs ────────────────────────────────────────────
-    confidence: float = 0.5   # 0.0 – 1.0
     title: str = ""
     action_summary: str = ""
     consensus_flag: str = ""  # "" | LOW_CONFIDENCE | FALLBACK_USED
@@ -61,7 +60,6 @@ class CrisisEvent:
             "affected_population": self.affected_population,
             "timestamp": self.timestamp.isoformat(),
             "status": self.status,
-            "confidence": round(self.confidence, 3),
             "title": self.title,
             "action_summary": self.action_summary,
             "consensus_flag": self.consensus_flag,
@@ -74,7 +72,6 @@ class CrisisEvent:
 @dataclass
 class AgentResult:
     """Base class for all agent outputs."""
-    confidence: float
     reason: str
     agent_name: str
 

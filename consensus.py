@@ -5,29 +5,27 @@ is emitted.
 Three scenarios:
 
   AGREEMENT (happy path)
-    All agents confidence >= 0.6, severity scores within 1 point, types match.
+    Severity scores within 1 point of the adapter estimate, types match.
     Pipeline proceeds immediately with no modifications.
 
   SOFT DISAGREEMENT
     Triggered when:
       • Severity scores differ by > 1 between any two agents, OR
-      • Classification type differs from the adapter's original type, OR
-      • Any single agent returns confidence < 0.6
+      • Classification type differs from the adapter's original type
     Resolution:
-      1. Weighted-average severity across agents
+      1. Averaged severity across adapter and agent scores
       2. Majority-vote type
       3. Reduce allocation scope by one tier (conservative hedge)
       4. Set consensus_flag = "LOW_CONFIDENCE"
 
   HARD DISAGREEMENT / AGENT FAILURE
     Triggered when:
-      • Two or more agents have confidence < 0.4, OR
       • An agent timed out or raised an exception (result is None), OR
       • Detection rejected an event that an authoritative source
         (USGS / NOAA / GDACS) rated as red alert
     Resolution:
       1. Source authority override — USGS/NOAA/GDACS red alert forces sev >= 4
-      2. Dead-agent substitution — clone last good result with conf -= 0.2
+      2. Dead-agent substitution — clone last good result from cache
       3. Circuit breaker — agent marked DEGRADED after 3 failures in 60 s
       4. Set consensus_flag = "FALLBACK_USED"
 """
@@ -96,14 +94,13 @@ def _cache_result(result):
         _last_good[result.agent_name] = result
 
 
-def _substitute(agent_name: str, conf_penalty: float = 0.2):
-    """Return the last-known-good result for an agent, with reduced confidence."""
+def _substitute(agent_name: str):
+    """Return the last-known-good result for an agent from cache."""
     cached = _last_good.get(agent_name)
     if cached is None:
         return None
     import copy
     sub = copy.copy(cached)
-    sub.confidence = max(0.0, sub.confidence - conf_penalty)
     sub.reason = f"[SUBSTITUTED from cache] {sub.reason}"
     return sub
 
@@ -145,12 +142,6 @@ class ConsensusEngine:
             hard_failure = True
 
         # ── Step 3: Classify disagreement level ──────────────────────────
-        low_conf_agents = [
-            r for r in [detection, classification, severity, allocation]
-            if r is not None and r.confidence < 0.6
-        ]
-        very_low_conf = [r for r in low_conf_agents if r.confidence < 0.4]
-
         severity_spread = self._severity_spread(event, severity)
         type_mismatch = (
             classification is not None and
@@ -159,25 +150,25 @@ class ConsensusEngine:
         )
 
         # ── Step 4: Resolution ───────────────────────────────────────────
-        if hard_failure or len(very_low_conf) >= 2:
+        if hard_failure:
             flag = "FALLBACK_USED"
-            severity = self._weighted_severity(event, severity, low_conf_agents)
+            severity = self._averaged_severity(event, severity)
             allocation = self._reduce_allocation(allocation)
             log.warning(
-                "CONSENSUS HARD: event=%s flag=%s missing_agents=%d very_low_conf=%d",
-                event.id[:8], flag, sum(1 for x in [detection, classification, severity, allocation] if x is None),
-                len(very_low_conf),
+                "CONSENSUS HARD: event=%s flag=%s missing_agents=%d",
+                event.id[:8], flag,
+                sum(1 for x in [detection, classification, severity, allocation] if x is None),
             )
 
-        elif len(low_conf_agents) > 0 or severity_spread > 1 or type_mismatch:
+        elif severity_spread > 1 or type_mismatch:
             flag = "LOW_CONFIDENCE"
-            severity = self._weighted_severity(event, severity, low_conf_agents)
+            severity = self._averaged_severity(event, severity)
             if classification is not None:
                 classification.event_type = self._majority_vote_type(event, classification)
             allocation = self._reduce_allocation(allocation)
             log.info(
-                "CONSENSUS SOFT: event=%s flag=%s low_conf=%d spread=%d type_mismatch=%s",
-                event.id[:8], flag, len(low_conf_agents), severity_spread, type_mismatch,
+                "CONSENSUS SOFT: event=%s flag=%s spread=%d type_mismatch=%s",
+                event.id[:8], flag, severity_spread, type_mismatch,
             )
 
         else:
@@ -203,7 +194,7 @@ class ConsensusEngine:
             _record_failure("detection")
             detection = _substitute("detection") or DetectionResult(
                 agent_name="detection", accepted=True,
-                confidence=0.3, reason="default substitution — agent unavailable",
+                reason="default substitution — agent unavailable",
             )
             hard_failure = True
 
@@ -211,7 +202,7 @@ class ConsensusEngine:
             _record_failure("classification")
             classification = _substitute("classification") or ClassificationResult(
                 agent_name="classification", event_type=event.type,
-                domain_tags=[], confidence=0.3,
+                domain_tags=[],
                 reason="default substitution — agent unavailable",
             )
             hard_failure = True
@@ -220,7 +211,7 @@ class ConsensusEngine:
             _record_failure("severity")
             severity = _substitute("severity") or SeverityResult(
                 agent_name="severity", score=3, raw_score=3.0,
-                confidence=0.3, reason="default substitution — agent unavailable",
+                reason="default substitution — agent unavailable",
             )
             hard_failure = True
 
@@ -229,7 +220,7 @@ class ConsensusEngine:
             allocation = _substitute("allocation") or AllocationResult(
                 agent_name="allocation", resources=["first-aid only"],
                 eta_minutes=0, depot_lat=0.0, depot_lon=0.0, depot_name="Unknown",
-                confidence=0.3, reason="default substitution — agent unavailable",
+                reason="default substitution — agent unavailable",
             )
             hard_failure = True
 
@@ -273,31 +264,22 @@ class ConsensusEngine:
             return 0
         return abs(severity.score - event.severity)
 
-    def _weighted_severity(
+    def _averaged_severity(
         self,
         event: CrisisEvent,
         severity: Optional[SeverityResult],
-        low_conf: list,
     ) -> Optional[SeverityResult]:
-        """
-        Compute a confidence-weighted average severity across:
-          - adapter's initial estimate (weight=0.5)
-          - severity agent score (weight=agent confidence)
-        """
+        """Average the adapter's initial severity estimate with the agent's score."""
         if severity is None:
             return severity
 
-        w_adapter = 0.5
-        w_agent = severity.confidence
-        weighted = (event.severity * w_adapter + severity.score * w_agent) / (w_adapter + w_agent)
-        new_score = max(1, min(5, round(weighted)))
+        new_score = max(1, min(5, round((event.severity + severity.score) / 2)))
 
         import copy
         result = copy.copy(severity)
         result.score = new_score
         result.reason = (
-            f"[WEIGHTED] adapter={event.severity}×{w_adapter:.1f} + "
-            f"agent={severity.score}×{w_agent:.2f} → {new_score}"
+            f"[AVERAGED] adapter={event.severity} + agent={severity.score} → {new_score}"
         )
         return result
 

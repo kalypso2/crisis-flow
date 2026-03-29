@@ -170,7 +170,6 @@ class USGSAdapter:
                 severity=_usgs_mag_to_severity(mag, alert),
                 timestamp=_ms_to_dt(p["time"]),
                 title=f"M{mag} earthquake — {p.get('place', 'unknown')}",
-                confidence=0.92,
                 raw=p,
             ))
         log.info("USGS: fetched %d events", len(events))
@@ -330,7 +329,6 @@ class NOAAAdapter:
                         severity=severity,
                         timestamp=_utcnow(),
                         title=f"{event_name} — {area_desc} ({idx} of {total})",
-                        confidence=0.90,
                         raw=p,
                     ))
             else:
@@ -344,7 +342,6 @@ class NOAAAdapter:
                     severity=severity,
                     timestamp=_utcnow(),
                     title=f"{event_name} — {area_desc}",
-                    confidence=0.90,
                     raw=p,
                 ))
         log.info("NOAA: fetched %d alerts", len(events))
@@ -397,7 +394,6 @@ class GDACSAdapter:
                 severity=_gdacs_alert_to_severity(alert),
                 timestamp=_utcnow(),
                 title=p.get("name", f"GDACS {ev_type}"),
-                confidence=0.88,
                 raw=p,
             ))
         log.info("GDACS: fetched %d events", len(events))
@@ -444,7 +440,6 @@ class EONETAdapter:
                 severity=3,  # EONET has no alert levels; severity agent refines
                 timestamp=_utcnow(),
                 title=item.get("title", f"EONET {ev_type}"),
-                confidence=0.80,
                 raw=item,
             ))
         log.info("EONET: fetched %d events", len(events))
@@ -508,7 +503,6 @@ class ACLEDAdapter:
                 severity=sev,
                 timestamp=_utcnow(),
                 title=f"{item.get('sub_event_type','Conflict event')} — {item.get('country','')}",
-                confidence=0.85,
                 raw=item,
             ))
         log.info("ACLED: fetched %d events", len(events))
@@ -607,7 +601,6 @@ class TwitterAdapter:
                         text = tweet.get("text", "")
 
                         matched = sum(1 for kw in CONFLICT_KEYWORDS if kw in text.lower())
-                        confidence = min(0.4 + matched * 0.08, 0.75)
 
                         lat, lon = self._extract_location(text)
                         event = CrisisEvent(
@@ -620,7 +613,6 @@ class TwitterAdapter:
                             severity=2 + min(matched, 2),
                             timestamp=_utcnow(),
                             title=text[:120],
-                            confidence=confidence,
                             raw=tweet,
                         )
                         callback(event)

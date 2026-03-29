@@ -99,12 +99,12 @@ _BASE_MERGE = """
 MERGE INTO {table} tgt USING (SELECT %s AS id) src ON tgt.id = src.id
 WHEN NOT MATCHED THEN INSERT (
     id, source, title, lat, lon, radius_km, location_name,
-    severity, affected_population, timestamp, status, confidence,
+    severity, affected_population, timestamp, status,
     action_summary, consensus_flag, domain_tags, allocation,
     globe_color, arc_source, arc_dest, raw
 ) VALUES (
     %s, %s, %s, %s, %s, %s, %s,
-    %s, %s, %s, %s, %s,
+    %s, %s, %s, %s,
     %s, %s, PARSE_JSON(%s), PARSE_JSON(%s),
     %s, PARSE_JSON(%s), PARSE_JSON(%s), PARSE_JSON(%s)
 )
@@ -126,7 +126,6 @@ def _base_params(ev: dict[str, Any]) -> tuple:
         int(ev.get("affected_population", 0)),
         ev.get("timestamp", datetime.now(timezone.utc).isoformat()),
         ev.get("status", "active"),
-        float(ev.get("confidence", 0.5)),
         ev.get("action_summary", ""),
         ev.get("consensus_flag", ""),
         json.dumps(ev.get("domain_tags", [])),
@@ -169,7 +168,7 @@ _CONFLICT_MERGE = """
 MERGE INTO CONFLICTS tgt USING (SELECT %s AS id) src ON tgt.id = src.id
 WHEN NOT MATCHED THEN INSERT (
     id, source, title, lat, lon, radius_km, location_name,
-    severity, affected_population, timestamp, status, confidence,
+    severity, affected_population, timestamp, status,
     action_summary, consensus_flag, domain_tags, allocation,
     globe_color, arc_source, arc_dest, raw,
     country, admin1, total_events, total_fatalities, population_exposed,
@@ -177,7 +176,7 @@ WHEN NOT MATCHED THEN INSERT (
     event_type_breakdown, sub_event_type_breakdown, disorder_type_breakdown
 ) VALUES (
     %s, %s, %s, %s, %s, %s, %s,
-    %s, %s, %s, %s, %s,
+    %s, %s, %s, %s,
     %s, %s, PARSE_JSON(%s), PARSE_JSON(%s),
     %s, PARSE_JSON(%s), PARSE_JSON(%s), PARSE_JSON(%s),
     %s, %s, %s, %s, %s,
@@ -207,7 +206,6 @@ def store_conflict_zone(m: dict[str, Any]) -> bool:
             int(m.get("affected_population") or m.get("population_exposed") or 0),
             ts,
             str(m.get("status", "active")),
-            0.85,
             "",
             "",
             json.dumps([]),

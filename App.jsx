@@ -203,7 +203,6 @@ function DetailPanel({ ev, binEvents, onSelectBinEvent, onClose }) {
         <Row label="Event ID"><span style={{ fontFamily: "monospace", fontSize: 11 }}>{ev.id?.slice(0, 16)}…</span></Row>
         <Row label="Timestamp">{new Date(ev.timestamp).toLocaleString()}</Row>
         <Row label="Status">{ev.status}</Row>
-        <Row label="Confidence">{(ev.confidence * 100).toFixed(0)}%</Row>
       </Section>
       </div>
     </div>
@@ -310,7 +309,7 @@ function GlobePanel({ events, onSelect }) {
         <Globe
           ref={globeRef}
           width={window.innerWidth - 660}
-          height={window.innerHeight - 140}
+          height={window.innerHeight - 220}
           backgroundColor="rgba(0,0,0,0)"
           globeImageUrl="//unpkg.com/three-globe/example/img/earth-blue-marble.jpg"
           bumpImageUrl="//unpkg.com/three-globe/example/img/earth-topology.png"
@@ -441,6 +440,105 @@ function StatsBar({ events, filter, onFilter }) {
   );
 }
 
+// ── Week helpers ──────────────────────────────────────────────────────────
+/** Returns a new Date set to Monday 00:00:00 of the week containing `date`. */
+function getWeekStart(date) {
+  const d = new Date(date);
+  const day = d.getDay();
+  const diff = day === 0 ? -6 : 1 - day; // Monday as first day of week
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + diff);
+  return d;
+}
+
+function addWeeks(date, n) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + n * 7);
+  return d;
+}
+
+function weeksBetween(a, b) {
+  return Math.round((b - a) / (7 * 24 * 60 * 60 * 1000));
+}
+
+function formatWeekLabel(date) {
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+// ── Timeline scrubber ─────────────────────────────────────────────────────
+function TimelineScrubber({ weekBounds, selectedIdx, onChange }) {
+  if (!weekBounds) return null;
+
+  const selectedStart = addWeeks(weekBounds.min, selectedIdx);
+  const selectedEnd   = addWeeks(selectedStart, 1);
+  const progress      = weekBounds.total > 0 ? (selectedIdx / weekBounds.total) * 100 : 100;
+
+  return (
+    <div style={{
+      borderTop: "0.5px solid var(--color-border-tertiary)",
+      padding: "10px 24px 12px",
+      background: "var(--color-background-primary)",
+      display: "flex",
+      flexDirection: "column",
+      gap: 6,
+      flexShrink: 0,
+    }}>
+      {/* Labels row */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={{ fontSize: 10, color: "var(--color-text-tertiary)" }}>
+          {formatWeekLabel(weekBounds.min)}
+        </span>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1 }}>
+          <span style={{ fontSize: 12, fontWeight: 500, color: "var(--color-text-primary)" }}>
+            {formatWeekLabel(selectedStart)} – {formatWeekLabel(selectedEnd)}
+          </span>
+          <span style={{ fontSize: 10, color: "var(--color-text-tertiary)" }}>
+            Week {selectedIdx + 1} of {weekBounds.total + 1}
+          </span>
+        </div>
+        <span style={{ fontSize: 10, color: "var(--color-text-tertiary)" }}>
+          {formatWeekLabel(weekBounds.max)}
+        </span>
+      </div>
+
+      {/* Slider */}
+      <div style={{ position: "relative", height: 20, display: "flex", alignItems: "center" }}>
+        {/* filled track */}
+        <div style={{
+          position: "absolute",
+          left: 0,
+          width: `${progress}%`,
+          height: 3,
+          background: "var(--color-text-info, #378ADD)",
+          borderRadius: 2,
+          pointerEvents: "none",
+          zIndex: 1,
+        }} />
+        <input
+          type="range"
+          min={0}
+          max={weekBounds.total}
+          step={1}
+          value={selectedIdx}
+          onChange={e => onChange(Number(e.target.value))}
+          style={{
+            width: "100%",
+            cursor: "pointer",
+            appearance: "none",
+            WebkitAppearance: "none",
+            height: 3,
+            background: "var(--color-border-secondary, #333)",
+            borderRadius: 2,
+            outline: "none",
+            position: "relative",
+            zIndex: 2,
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Main App
 // ═══════════════════════════════════════════════════════════════════════════
@@ -474,7 +572,6 @@ function normalizeRow(row, fallbackType) {
     affected_population: parseInt(lower.affected_population) || 0,
     timestamp: lower.timestamp || "",
     status: lower.status || "active",
-    confidence: parseFloat(lower.confidence) || 0.5,
     action_summary: lower.action_summary || "",
     consensus_flag: lower.consensus_flag || "",
     domain_tags: tryParseJson(lower.domain_tags, []),
@@ -497,6 +594,11 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [filter, setFilter] = useState("all");
 
+  // Week timeline state — max week is locked to the week the site first loaded
+  const loadWeekRef = useRef(getWeekStart(new Date()));
+  const [weekBounds, setWeekBounds] = useState(null); // { min: Date, max: Date, total: number }
+  const [selectedWeekIdx, setSelectedWeekIdx] = useState(0);
+
   const base = useMemo(() => apiOrigin(), []);
   const healthUrl = `${base}/health`;
 
@@ -511,6 +613,18 @@ export default function App() {
         const normalized = (data || []).map((r) => normalizeRow(r, r.type || r.TYPE || "unknown"));
         setEvents(normalized);
         setConnected(true);
+
+        // Compute week bounds from the dataset
+        const dates = normalized
+          .map(ev => ev.timestamp ? new Date(ev.timestamp) : null)
+          .filter(d => d && !isNaN(d));
+        if (dates.length > 0) {
+          const minWeek = getWeekStart(new Date(Math.min(...dates)));
+          const maxWeek = loadWeekRef.current;
+          const total = Math.max(weeksBetween(minWeek, maxWeek), 0);
+          setWeekBounds({ min: minWeek, max: maxWeek, total });
+          setSelectedWeekIdx(total); // default to current (latest) week
+        }
       })
       .catch(() => {
         if (cancelled) return;
@@ -520,10 +634,26 @@ export default function App() {
     return () => { cancelled = true; };
   }, [base]);
 
-  // Client-side filter — instant, no extra network round-trip
+  // Filter events to the selected week
+  const selectedWeekStart = useMemo(() => {
+    if (!weekBounds) return null;
+    return addWeeks(weekBounds.min, selectedWeekIdx);
+  }, [weekBounds, selectedWeekIdx]);
+
+  const weekFilteredEvents = useMemo(() => {
+    if (!selectedWeekStart) return events;
+    const end = addWeeks(selectedWeekStart, 1);
+    return events.filter(ev => {
+      if (!ev.timestamp) return false;
+      const d = new Date(ev.timestamp);
+      return d >= selectedWeekStart && d < end;
+    });
+  }, [events, selectedWeekStart]);
+
+  // Then apply type filter on top of the week slice
   const displayedEvents = useMemo(() =>
-    filter === "all" ? events : events.filter(ev => ev.type === filter),
-  [events, filter]);
+    filter === "all" ? weekFilteredEvents : weekFilteredEvents.filter(ev => ev.type === filter),
+  [weekFilteredEvents, filter]);
 
 
   // Health polling
@@ -562,7 +692,7 @@ export default function App() {
         </div>
       </div>
 
-      <StatsBar events={events} filter={filter} onFilter={setFilter} />
+      <StatsBar events={weekFilteredEvents} filter={filter} onFilter={setFilter} />
 
       {/* Main layout */}
       <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
@@ -621,6 +751,13 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {/* Timeline scrubber */}
+      <TimelineScrubber
+        weekBounds={weekBounds}
+        selectedIdx={selectedWeekIdx}
+        onChange={setSelectedWeekIdx}
+      />
     </div>
   );
 }

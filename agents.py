@@ -29,17 +29,6 @@ from schema import (
 log = logging.getLogger(__name__)
 
 
-# ── Source reliability weights ────────────────────────────────────────────
-
-SOURCE_CONFIDENCE = {
-    "usgs": 0.92,
-    "noaa": 0.90,
-    "gdacs": 0.88,
-    "eonet": 0.80,
-    "acled": 0.85,
-    "twitter": 0.50,   # base; adjusted per event by keyword density
-}
-
 # Sources that are treated as authoritative — their red alerts override agents
 AUTHORITATIVE_SOURCES = {"usgs", "noaa", "gdacs"}
 
@@ -54,17 +43,15 @@ class DetectionAgent:
 
     Accept criteria (ALL must pass):
       1. event.severity >= 2
-      2. event.confidence >= 0.4
-      3. Not a known false-positive pattern (Twitter noise filter)
-      4. lat/lon are non-zero OR source is authoritative
+      2. Not a known false-positive pattern (Twitter noise filter)
+      3. lat/lon are non-zero OR source is authoritative
 
     For Twitter events an extra keyword-density check runs:
       - If the tweet contains a keyword but the surrounding context is clearly
         historical ("last year's bombing", "anniversary of the airstrike") it
         is rejected with reason "historical_reference".
-      - Confidence is boosted if multiple distinct keyword clusters appear.
 
-    Emits: DetectionResult(accepted, confidence, reason)
+    Emits: DetectionResult(accepted, reason)
     """
 
     HISTORICAL_MARKERS = [
@@ -74,37 +61,24 @@ class DetectionAgent:
     ]
 
     def run(self, event: CrisisEvent) -> DetectionResult:
-        base_conf = SOURCE_CONFIDENCE.get(event.source, 0.5)
-
         # ── Rule 1: minimum severity ──────────────────────────────────────
         if event.severity < 2:
             return DetectionResult(
                 agent_name="detection",
                 accepted=False,
-                confidence=base_conf,
                 reason=f"severity {event.severity} below minimum threshold of 2",
             )
 
-        # ── Rule 2: minimum confidence ────────────────────────────────────
-        if event.confidence < 0.4:
-            return DetectionResult(
-                agent_name="detection",
-                accepted=False,
-                confidence=base_conf,
-                reason=f"source confidence {event.confidence:.2f} below 0.40",
-            )
-
-        # ── Rule 3: location sanity ───────────────────────────────────────
+        # ── Rule 2: location sanity ───────────────────────────────────────
         if event.lat == 0.0 and event.lon == 0.0:
             if event.source not in AUTHORITATIVE_SOURCES:
                 return DetectionResult(
                     agent_name="detection",
                     accepted=False,
-                    confidence=0.2,
                     reason="no location data and source is not authoritative",
                 )
 
-        # ── Rule 4: Twitter noise filter ──────────────────────────────────
+        # ── Rule 3: Twitter noise filter ──────────────────────────────────
         if event.source == "twitter":
             text = event.raw.get("text", "").lower()
             for marker in self.HISTORICAL_MARKERS:
@@ -112,20 +86,12 @@ class DetectionAgent:
                     return DetectionResult(
                         agent_name="detection",
                         accepted=False,
-                        confidence=0.3,
                         reason=f"twitter event rejected: historical_reference marker '{marker}'",
                     )
-            # Boost confidence for high keyword density
-            from adapters import CONFLICT_KEYWORDS
-            matched = sum(1 for kw in CONFLICT_KEYWORDS if kw in text)
-            adjusted_conf = min(0.4 + matched * 0.08, 0.75)
-            event.confidence = adjusted_conf
-            base_conf = adjusted_conf
 
         return DetectionResult(
             agent_name="detection",
             accepted=True,
-            confidence=base_conf,
             reason="passed all detection checks",
         )
 
@@ -157,7 +123,7 @@ class ClassificationAgent:
       conflict    → ["civilian_risk", "humanitarian_corridor"]
       iceberg     → ["maritime_hazard"]
 
-    Emits: ClassificationResult(event_type, domain_tags, confidence, reason)
+    Emits: ClassificationResult(event_type, domain_tags, reason)
     """
 
     NOAA_TYPE_MAP = {
@@ -188,7 +154,6 @@ class ClassificationAgent:
     def run(self, event: CrisisEvent) -> ClassificationResult:
         ev_type = event.type  # may already be set by adapter
         tags = self.DOMAIN_TAGS.get(ev_type, [])
-        confidence = 0.85
         reason = f"type '{ev_type}' carried from adapter"
 
         # ── Refine NOAA type using the raw event string ───────────────────
@@ -197,7 +162,6 @@ class ClassificationAgent:
             if raw_event in self.NOAA_TYPE_MAP:
                 ev_type, tags = self.NOAA_TYPE_MAP[raw_event]
                 reason = f"noaa event '{raw_event}' mapped to '{ev_type}'"
-                confidence = 0.90
 
         # ── Refine ACLED using sub_event_type ─────────────────────────────
         if event.source == "acled":
@@ -217,14 +181,12 @@ class ClassificationAgent:
                 tags = ["civilian_risk", "ground_conflict"]
             else:
                 tags = ["civilian_risk", "humanitarian_corridor"]
-            confidence = 0.65
             reason = "twitter keyword cluster classification"
 
         return ClassificationResult(
             agent_name="classification",
             event_type=ev_type,
             domain_tags=tags,
-            confidence=confidence,
             reason=reason,
         )
 
@@ -264,7 +226,7 @@ class SeverityAgent:
       Population bonus:
         affected_population > 100,000 → +1 (capped at 5)
 
-    Emits: SeverityResult(score, raw_score, confidence, reason)
+    Emits: SeverityResult(score, raw_score, reason)
     """
 
     def run(self, event: CrisisEvent, classification: ClassificationResult) -> SeverityResult:
@@ -330,7 +292,6 @@ class SeverityAgent:
             agent_name="severity",
             score=score,
             raw_score=raw_score,
-            confidence=0.88,
             reason=" | ".join(reason_parts),
         )
 
@@ -424,7 +385,7 @@ class AllocationAgent:
       4. For conflict events: never route through the conflict country
          (safety override — picks second-nearest depot)
 
-    Emits: AllocationResult(resources, eta_minutes, depot_lat, depot_lon, depot_name)
+    Emits: AllocationResult(resources, eta_minutes, depot_lat, depot_lon, depot_name, reason)
     """
 
     AVG_SPEED_KMH = 600  # air freight baseline
@@ -459,7 +420,6 @@ class AllocationAgent:
             depot_lat=chosen["lat"],
             depot_lon=chosen["lon"],
             depot_name=chosen["name"],
-            confidence=0.82,
             reason=f"depot={chosen['name']} dist={dist_km:.0f}km eta={eta_minutes}min resources={resources}",
         )
 
@@ -497,7 +457,7 @@ class CommunicationAgent:
       arc_source   — (lat, lon) of the depot
       arc_dest     — (lat, lon) of the event
 
-    Emits: CommunicationResult(summary, globe_color, arc_source, arc_dest)
+    Emits: CommunicationResult(summary, globe_color, arc_source, arc_dest, reason)
     """
 
     def run(
@@ -533,6 +493,5 @@ class CommunicationAgent:
             globe_color=TYPE_COLORS.get(classification.event_type, "#888780"),
             arc_source=(allocation.depot_lat, allocation.depot_lon),
             arc_dest=(event.lat, event.lon),
-            confidence=0.95,
             reason="communication summary generated",
         )

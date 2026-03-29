@@ -394,7 +394,6 @@ def ingest_static_acled_once():
                 affected_population=int(row.get("affected_population") or 0),
                 timestamp=ts,
                 status=str(row.get("status") or "active"),
-                confidence=0.85,
                 title=str(row.get("title") or "ACLED static conflict event"),
                 raw=row,
             )

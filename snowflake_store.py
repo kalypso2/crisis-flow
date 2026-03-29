@@ -57,6 +57,28 @@ def _get_conn() -> snowflake.connector.SnowflakeConnection:
         return _conn
 
 
+# ── One-time schema migration ─────────────────────────────────────────────
+
+def drop_confidence_column() -> None:
+    """
+    Drop the CONFIDENCE column from all event tables if it still exists.
+    Safe to call on every startup — silently skips tables that already
+    had the column removed.
+    """
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        for table in ALL_TABLES:
+            try:
+                cur.execute(f"ALTER TABLE {table} DROP COLUMN IF EXISTS CONFIDENCE")
+                conn.commit()
+                log.info("Migration: dropped CONFIDENCE column from %s (or it was already gone)", table)
+            except Exception as exc:
+                log.warning("Migration: could not drop CONFIDENCE from %s: %s", table, exc)
+    except Exception as exc:
+        log.warning("Migration: skipped (Snowflake unavailable): %s", exc)
+
+
 # ── Per-table row cap tracking ─────────────────────────────────────────────
 _table_counts: dict[str, int] = {}
 _counts_loaded = False

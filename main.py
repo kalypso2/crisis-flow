@@ -535,6 +535,8 @@ def health():
 if __name__ == "__main__":
     log.info("=== CrisisFlow pipeline starting ===")
 
+    snowflake_store.drop_confidence_column()
+
     threading.Thread(target=consumer_thread, name="consumer", daemon=True).start()
     start_ingestion_threads()
 

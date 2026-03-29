@@ -33,3 +33,4 @@ config/keys.env
 # Timestamp agent outputs (generated, can be large)
 data/acled_globe_markers_refined.json
 data/timestamp_cache.json
+data/cached_responses/

@@ -35,10 +35,11 @@ Output:
     data/timestamp_cache.json               per-marker cache, speeds re-runs
 
 Setup:
-    pip install google-genai python-dotenv
-    # Add to .env (repo root):
-    #   GOOGLE_API_KEY=your_key_here
-    # Get a free key: https://aistudio.google.com/app/apikey
+    pip install google-genai python-dotenv google-generativeai
+    # Add to .env (repo root) — see .env.example:
+    #   GEMINI_KEYS=key1,key2,...   # rotation (recommended on free tier)
+    #   GOOGLE_API_KEY=key1         # fallback if GEMINI_KEYS unset
+    # Keys: https://aistudio.google.com/app/apikey
 """
 
 from __future__ import annotations
@@ -87,17 +88,19 @@ GEMINI_MODEL = "gemini-2.0-flash"
 # Utilities
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _check_api_key() -> str:
-    key = os.getenv("GOOGLE_API_KEY", "")
-    if not key:
+def _ensure_api_credentials() -> None:
+    """Require GEMINI_KEYS and/or GOOGLE_API_KEY (see gemini_manager / .env.example)."""
+    raw = os.getenv("GEMINI_KEYS", "").strip()
+    single = os.getenv("GOOGLE_API_KEY", "").strip()
+    if not raw and not single:
         log.error(
-            "GOOGLE_API_KEY not set.\n"
-            "Add it to .env (repo root):\n"
-            "  GOOGLE_API_KEY=your_key_here\n"
-            "Get a free key at: https://aistudio.google.com/app/apikey"
+            "No Gemini API keys set.\n"
+            "Add to .env (repo root), for example:\n"
+            "  GEMINI_KEYS=key_from_project_1,key_from_project_2\n"
+            "  GOOGLE_API_KEY=key_from_project_1\n"
+            "Get keys at: https://aistudio.google.com/app/apikey"
         )
         sys.exit(1)
-    return key
 
 
 def load_cache() -> dict:
@@ -260,6 +263,19 @@ def _make_client(api_key: str):
         sys.exit(1)
 
 
+_client_by_key: dict[str, object] = {}
+
+
+def _get_rotating_client():
+    """One Client per key; picks the next key each call (gemini_manager rotation)."""
+    from gemini_manager import get_next_api_key
+
+    key = get_next_api_key()
+    if key not in _client_by_key:
+        _client_by_key[key] = _make_client(key)
+    return _client_by_key[key]
+
+
 async def query_gemini_search(client, row: dict) -> dict:
     """
     Send one search-grounded prompt to Gemini and return a parsed result dict.
@@ -374,7 +390,8 @@ def _write_refined(original_markers: list[dict], refined_by_id: dict[str, dict])
 
 async def refine_timestamps(args):
     """Load markers → call Gemini Search per marker → save refined output."""
-    api_key = None if args.dry_run else _check_api_key()
+    if not args.dry_run:
+        _ensure_api_credentials()
 
     if not ORIGINAL_FILE.exists():
         log.error("ACLED static file not found: %s", ORIGINAL_FILE)
@@ -408,8 +425,7 @@ async def refine_timestamps(args):
             print(build_search_prompt(row))
         return
 
-    client = _make_client(api_key)
-    stats  = {"searched": 0, "refined": 0, "cache_hit": 0, "fallback": 0, "errors": 0}
+    stats = {"searched": 0, "refined": 0, "cache_hit": 0, "fallback": 0, "errors": 0}
 
     for i, row in enumerate(work_markers):
         marker_id = row["id"]
@@ -430,9 +446,9 @@ async def refine_timestamps(args):
             log.info("  Cache hit → %s", refined["timestamp"][:10])
             continue
 
-        # ── Live search ───────────────────────────────────────────────────
+        # ── Live search (rotating GEMINI_KEYS / GOOGLE_API_KEY) ─────────────
         try:
-            result = await query_gemini_search(client, row)
+            result = await query_gemini_search(_get_rotating_client(), row)
             stats["searched"] += 1
 
             if result.get("date"):

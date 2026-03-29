@@ -363,8 +363,8 @@ function GlobePanel({ events, onSelect }) {
   );
 }
 
-// ── Stats bar ─────────────────────────────────────────────────────────────
-function StatsBar({ events }) {
+// ── Stats bar (clickable filter tabs) ─────────────────────────────────────
+function StatsBar({ events, filter, onFilter }) {
   const counts = events.reduce((acc, e) => {
     acc[e.type] = (acc[e.type] || 0) + 1;
     return acc;
@@ -372,29 +372,70 @@ function StatsBar({ events }) {
   const high = events.filter(e => e.severity >= 4).length;
   const flagged = events.filter(e => e.consensus_flag).length;
 
+  // Non-filterable summary cells (no onClick)
+  const summaryItems = [
+    { label: "Total",     val: events.length, color: "var(--color-text-primary)",   key: null },
+    { label: "Critical+", val: high,          color: "#D85A30",                     key: null },
+    { label: "Flagged",   val: flagged,        color: "#EF9F27",                     key: null },
+  ];
+
+  // Filterable type cells — "all" first, then each type that has events
+  const typeItems = [
+    { label: "all", val: events.length, color: "var(--color-text-secondary)", key: "all" },
+    ...Object.entries(counts).map(([t, c]) => ({
+      label: TYPE_EMOJI[t] ? `${TYPE_EMOJI[t]} ${t}` : t,
+      val: c,
+      color: TYPE_COLOR[t] || "var(--color-text-secondary)",
+      key: t,
+    })),
+  ];
+
+  const cellStyle = (active) => ({
+    padding: "8px 16px",
+    borderRight: "0.5px solid var(--color-border-tertiary)",
+    minWidth: 70,
+    textAlign: "center",
+    background: active ? "var(--color-background-info)" : "transparent",
+    transition: "background 0.15s",
+  });
+
   return (
     <div style={{
       display: "flex", gap: 0,
       borderBottom: "0.5px solid var(--color-border-tertiary)",
       overflowX: "auto",
     }}>
-      {[
-        ["Total", events.length, "var(--color-text-primary)"],
-        ["Critical+", high, "#D85A30"],
-        ["Flagged", flagged, "#EF9F27"],
-        ...Object.entries(counts).slice(0, 5).map(([t, c]) => [
-          TYPE_EMOJI[t] + " " + t, c, "var(--color-text-secondary)"
-        ]),
-      ].map(([label, val, color]) => (
-        <div key={label} style={{
-          padding: "8px 16px",
-          borderRight: "0.5px solid var(--color-border-tertiary)",
-          minWidth: 70,
-          textAlign: "center",
-        }}>
+      {summaryItems.map(({ label, val, color }) => (
+        <div key={label} style={cellStyle(false)}>
           <div style={{ fontSize: 16, fontWeight: 500, color }}>{val}</div>
           <div style={{ fontSize: 10, color: "var(--color-text-tertiary)" }}>{label}</div>
         </div>
+      ))}
+
+      {/* Divider between summary and filter cells */}
+      <div style={{ width: 1, background: "var(--color-border-secondary)", margin: "6px 0" }} />
+
+      {typeItems.map(({ label, val, color, key }) => (
+        <button
+          key={key}
+          onClick={() => onFilter(key)}
+          style={{
+            ...cellStyle(filter === key),
+            border: "none",
+            cursor: "pointer",
+            fontFamily: "inherit",
+          }}
+        >
+          <div style={{
+            fontSize: 16, fontWeight: 500,
+            color: filter === key ? "var(--color-text-info)" : color,
+          }}>{val}</div>
+          <div style={{
+            fontSize: 10,
+            color: filter === key ? "var(--color-text-info)" : "var(--color-text-tertiary)",
+            fontWeight: filter === key ? 600 : 400,
+          }}>{label}</div>
+        </button>
       ))}
     </div>
   );
@@ -404,10 +445,6 @@ function StatsBar({ events }) {
 // Main App
 // ═══════════════════════════════════════════════════════════════════════════
 
-const EVENT_TYPES = [
-  "all", "conflict", "earthquake", "flood", "storm",
-  "wildfire", "cyclone", "volcano", "drought", "iceberg",
-];
 
 function tryParseJson(val, fallback) {
   if (Array.isArray(val) || (val && typeof val === "object")) return val;
@@ -459,7 +496,6 @@ export default function App() {
   const [health, setHealth] = useState(null);
   const [connected, setConnected] = useState(false);
   const [filter, setFilter] = useState("all");
-  const [tableCounts, setTableCounts] = useState({});
 
   const base = useMemo(() => apiOrigin(), []);
   const healthUrl = `${base}/health`;
@@ -489,17 +525,6 @@ export default function App() {
     filter === "all" ? events : events.filter(ev => ev.type === filter),
   [events, filter]);
 
-  // Fetch Snowflake table counts for tab badges
-  useEffect(() => {
-    const poll = () =>
-      fetch(`${base}/snowflake/summary`)
-        .then((r) => r.json())
-        .then(setTableCounts)
-        .catch(() => {});
-    poll();
-    const id = setInterval(poll, 30000);
-    return () => clearInterval(id);
-  }, [base]);
 
   // Health polling
   useEffect(() => {
@@ -537,35 +562,7 @@ export default function App() {
         </div>
       </div>
 
-      <StatsBar events={events} />
-
-      {/* Filter bar — one tab per Snowflake table */}
-      <div style={{
-        display: "flex", gap: 0, padding: "6px 14px",
-        borderBottom: "0.5px solid var(--color-border-tertiary)",
-        overflowX: "auto",
-      }}>
-        {EVENT_TYPES.map(f => {
-          const count = f === "all"
-            ? Object.values(tableCounts).reduce((a, b) => a + b, 0)
-            : (tableCounts[f] || 0);
-          return (
-            <button key={f} onClick={() => setFilter(f)} style={{
-              padding: "4px 12px", fontSize: 11, border: "none", cursor: "pointer",
-              borderRadius: 4, marginRight: 4,
-              background: filter === f ? "var(--color-background-info)" : "transparent",
-              color: filter === f ? "var(--color-text-info)" : "var(--color-text-tertiary)",
-              fontWeight: filter === f ? 500 : 400,
-              display: "flex", alignItems: "center", gap: 4,
-            }}>
-              {TYPE_EMOJI[f] || ""} {f}
-              {count > 0 && (
-                <span style={{ fontSize: 9, opacity: 0.7 }}>({count})</span>
-              )}
-            </button>
-          );
-        })}
-      </div>
+      <StatsBar events={events} filter={filter} onFilter={setFilter} />
 
       {/* Main layout */}
       <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>

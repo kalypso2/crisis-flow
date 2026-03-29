@@ -144,6 +144,13 @@ def _evict_oldest(table: str):
 
 _BASE_MERGE = """
 MERGE INTO {table} tgt USING (SELECT %s AS id) src ON tgt.id = src.id
+WHEN MATCHED THEN UPDATE SET
+    severity = %s, affected_population = %s, status = %s,
+    action_summary = %s, consensus_flag = %s,
+    domain_tags = PARSE_JSON(%s), allocation = PARSE_JSON(%s),
+    globe_color = %s, arc_source = PARSE_JSON(%s), arc_dest = PARSE_JSON(%s),
+    raw = PARSE_JSON(%s), agent_reasoning = PARSE_JSON(%s),
+    citizen_alert = %s, operational_summary = %s, arcs = PARSE_JSON(%s)
 WHEN NOT MATCHED THEN INSERT (
     id, source, title, lat, lon, radius_km, location_name,
     severity, affected_population, timestamp, status,
@@ -162,8 +169,32 @@ WHEN NOT MATCHED THEN INSERT (
 
 def _base_params(ev: dict[str, Any]) -> tuple:
     eid = ev.get("id", "")
+    # Shared field values
+    severity          = int(ev.get("severity", 1))
+    affected_pop      = int(ev.get("affected_population", 0))
+    status            = ev.get("status", "active")
+    action_summary    = ev.get("action_summary", "")
+    consensus_flag    = ev.get("consensus_flag", "")
+    domain_tags       = json.dumps(ev.get("domain_tags", []))
+    allocation        = json.dumps(ev.get("allocation", {}))
+    globe_color       = ev.get("globe_color", "#888780")
+    arc_source        = json.dumps(ev.get("arc_source", [0, 0]))
+    arc_dest          = json.dumps(ev.get("arc_dest", [0, 0]))
+    raw               = json.dumps(ev.get("raw", {}))
+    agent_reasoning   = json.dumps(ev.get("agent_reasoning", {}))
+    citizen_alert     = ev.get("citizen_alert", "") or ""
+    operational_sum   = ev.get("operational_summary", "") or ""
+    arcs              = json.dumps(ev.get("arcs", []))
     return (
         eid,  # MERGE key
+        # UPDATE fields (WHEN MATCHED)
+        severity, affected_pop, status,
+        action_summary, consensus_flag,
+        domain_tags, allocation,
+        globe_color, arc_source, arc_dest,
+        raw, agent_reasoning,
+        citizen_alert, operational_sum, arcs,
+        # INSERT fields (WHEN NOT MATCHED)
         eid,
         ev.get("source", ""),
         ev.get("title", ""),
@@ -171,22 +202,12 @@ def _base_params(ev: dict[str, Any]) -> tuple:
         float(ev.get("lon", 0)),
         float(ev.get("radius_km", 0)),
         ev.get("location_name", ""),
-        int(ev.get("severity", 1)),
-        int(ev.get("affected_population", 0)),
+        severity, affected_pop,
         ev.get("timestamp", datetime.now(timezone.utc).isoformat()),
-        ev.get("status", "active"),
-        ev.get("action_summary", ""),
-        ev.get("consensus_flag", ""),
-        json.dumps(ev.get("domain_tags", [])),
-        json.dumps(ev.get("allocation", {})),
-        ev.get("globe_color", "#888780"),
-        json.dumps(ev.get("arc_source", [0, 0])),
-        json.dumps(ev.get("arc_dest", [0, 0])),
-        json.dumps(ev.get("raw", {})),
-        json.dumps(ev.get("agent_reasoning", {})),
-        ev.get("citizen_alert", "") or "",
-        ev.get("operational_summary", "") or "",
-        json.dumps(ev.get("arcs", [])),
+        status,
+        action_summary, consensus_flag, domain_tags, allocation,
+        globe_color, arc_source, arc_dest, raw,
+        agent_reasoning, citizen_alert, operational_sum, arcs,
     )
 
 

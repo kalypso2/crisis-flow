@@ -1,12 +1,12 @@
 {
   "name": "CrisisFlow",
   "description": "Autonomous multi-agent disaster response system. Ingests live crisis signals from USGS, NOAA, GDACS, and NASA EONET, processes them through a 9-agent AI pipeline powered by Google Gemini, allocates humanitarian aid from 6 real UN depots, and self-corrects its own severity assessments using a LoopAgent feedback mechanism.",
-  "url": "http://localhost:8001",
+  "url": "https://crisisflow-main-67110531293.us-central1.run.app",
   "version": "1.0.0",
   "documentationUrl": "https://github.com/crisisflow/crisisflow",
   "provider": {
     "organization": "CrisisFlow",
-    "url": "http://localhost:8001"
+    "url": "https://crisisflow-main-67110531293.us-central1.run.app"
   },
   "capabilities": {
     "streaming": true,

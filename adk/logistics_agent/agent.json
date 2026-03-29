@@ -1,11 +1,11 @@
 {
   "name": "CrisisFlow Logistics Specialist",
   "description": "A2A specialist agent for humanitarian supply chain optimization. Queries live inventory across 6 real UNHRD (UN Humanitarian Response Depot) hubs, calculates aid requirements by disaster type and severity, and dispatches optimal convoy combinations with transport mode selection (air/sea/land) and ETA calculation.",
-  "url": "http://localhost:8002",
+  "url": "https://crisisflow-logistics-67110531293.us-central1.run.app",
   "version": "1.0.0",
   "provider": {
     "organization": "CrisisFlow",
-    "url": "http://localhost:8001"
+    "url": "https://crisisflow-main-67110531293.us-central1.run.app"
   },
   "capabilities": {
     "streaming": false,

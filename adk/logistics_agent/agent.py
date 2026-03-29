@@ -47,14 +47,15 @@ def list_available_hubs(event_type: str, tool_context: ToolContext) -> str:
         import depot_inventory as inv
         from hub_agents import HUBS
 
+        all_stock = inv.get_inventory()
         lines = []
         for hub in HUBS:
             name = hub["name"]
             specs = hub.get("specializations", [])
-            stock = inv.get_inventory(name) or {}
+            stock = all_stock.get(name, {})
             is_specialist = event_type.lower() in [s.lower() for s in specs]
             specialist_tag = " ★SPECIALIST" if is_specialist else ""
-            vehicles     = stock.get("field_vehicles", 0)
+            vehicles     = stock.get("vehicles", stock.get("field_vehicles", 0))
             med_kits     = stock.get("medical_kits", 0)
             food_rations = stock.get("food_rations", 0)
             lines.append(
@@ -99,13 +100,7 @@ def commit_hub_allocation(
         if not hub_meta:
             return json.dumps({"error": f"Unknown hub: {hub_name}"})
 
-        hub_agent = HubAgent(
-            name=hub_meta["name"],
-            org=hub_meta["org"],
-            lat=hub_meta["lat"],
-            lon=hub_meta["lon"],
-            specializations=hub_meta.get("specializations", []),
-        )
+        hub_agent = HubAgent(hub_meta)
 
         try:
             from claude_manager import ClaudeManager
@@ -118,7 +113,6 @@ def commit_hub_allocation(
 
         bid = hub_agent.bid(
             event_type=event_type,
-            severity=severity,
             need=need,
             event_lat=event_lat,
             event_lon=event_lon,
@@ -129,7 +123,7 @@ def commit_hub_allocation(
 
         # Commit the inventory
         import depot_inventory as inv
-        inv.commit(hub_name, bid.committed)
+        inv.commit(hub_name, bid.contribution)
 
         return json.dumps({
             "hub_name":    hub_name,
@@ -139,7 +133,7 @@ def commit_hub_allocation(
             "transport":   bid.transport,
             "dist_km":     round(bid.dist_km, 1),
             "eta_minutes": bid.eta_minutes,
-            "supplies":    bid.committed,
+            "supplies":    bid.contribution,
         })
     except Exception as exc:
         log.error("commit_hub_allocation failed: %s", exc)

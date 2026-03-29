@@ -1,0 +1,35 @@
+{
+  "name": "CrisisFlow Logistics Specialist",
+  "description": "A2A specialist agent for humanitarian supply chain optimization. Queries live inventory across 6 real UNHRD (UN Humanitarian Response Depot) hubs, calculates aid requirements by disaster type and severity, and dispatches optimal convoy combinations with transport mode selection (air/sea/land) and ETA calculation.",
+  "url": "http://localhost:8002",
+  "version": "1.0.0",
+  "provider": {
+    "organization": "CrisisFlow",
+    "url": "http://localhost:8001"
+  },
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false,
+    "stateTransitionHistory": false
+  },
+  "authentication": {
+    "schemes": ["none"]
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["application/json"],
+  "skills": [
+    {
+      "id": "allocate_from_hubs",
+      "name": "Allocate Aid From UNHRD Hubs",
+      "description": "Given a disaster type, severity (1-5), affected population, and event coordinates, selects optimal UNHRD depot(s), commits live inventory, and returns a full convoy manifest with ETAs.",
+      "tags": ["logistics", "UNHRD", "convoy", "inventory", "humanitarian", "aid"],
+      "examples": [
+        "Allocate humanitarian aid for a severity 4 cyclone in Mozambique with 50,000 people affected.",
+        "Which UNHRD hubs should respond to a magnitude 6.8 earthquake near Kathmandu?",
+        "Dispatch medical kits and field vehicles to coordinates 13.5, 45.2 for a flood emergency."
+      ],
+      "inputModes": ["text/plain"],
+      "outputModes": ["application/json"]
+    }
+  ]
+}

@@ -71,35 +71,85 @@ def run_allocation(tool_context: ToolContext) -> str:
 
 def _call_a2a_logistics(ev_type: str, severity: int, event) -> dict | None:
     """
-    Attempt to call the remote A2A logistics specialist agent.
+    Call the A2A logistics specialist agent via ADK api_server protocol.
+    Creates a session, sends the allocation request, extracts the JSON result.
     Returns allocation dict if successful, None if service is unavailable.
     """
-    import requests
+    import requests, uuid
+
+    base = LOGISTICS_A2A_URL
+    user_id = "crisisflow_pipeline"
+    session_id = str(uuid.uuid4())
+    app_name = "logistics_agent"
+
+    message = (
+        f"Allocate humanitarian aid for a {ev_type} disaster. "
+        f"Severity: {severity}/5. "
+        f"Location: {event.location_name or f'({event.lat:.2f}, {event.lon:.2f})'}. "
+        f"Affected population: {event.affected_population:,}. "
+        f"Event coordinates: lat={event.lat}, lon={event.lon}. "
+        f"Return JSON with primary_hub, org, transport_mode, eta_minutes, resources, convoys."
+    )
+
     try:
-        payload = {
-            "message": (
-                f"Allocate humanitarian aid for a {ev_type} disaster. "
-                f"Severity: {severity}/5. "
-                f"Location: {event.location_name or f'({event.lat:.2f}, {event.lon:.2f})'}. "
-                f"Affected population: {event.affected_population:,}. "
-                f"Event lat: {event.lat}, lon: {event.lon}."
-            )
+        # Step 1: Check the logistics agent is alive
+        ping = requests.get(f"{base}/list-apps", timeout=3)
+        if ping.status_code != 200 or app_name not in ping.json():
+            log.debug("A2A logistics specialist not available at %s", base)
+            return None
+
+        # Step 2: Create session
+        sess_url = f"{base}/apps/{app_name}/users/{user_id}/sessions/{session_id}"
+        requests.post(sess_url, json={}, timeout=3)
+
+        # Step 3: Run agent
+        run_payload = {
+            "appName": app_name,
+            "userId": user_id,
+            "sessionId": session_id,
+            "newMessage": {
+                "role": "user",
+                "parts": [{"text": message}],
+            },
+            "streaming": False,
         }
-        r = requests.post(f"{LOGISTICS_A2A_URL}/run", json=payload, timeout=5)
-        if r.status_code == 200:
-            data = r.json()
-            # Parse A2A response into our allocation schema
-            return {
-                "resources":   data.get("resources", []),
-                "eta_minutes": data.get("eta_minutes", 0),
-                "depot_name":  data.get("primary_hub", ""),
-                "depot_org":   data.get("org", ""),
-                "transport_mode": data.get("transport_mode", "air"),
-                "convoys":     data.get("convoys", []),
-            }
+        r = requests.post(f"{base}/run", json=run_payload, timeout=90)
+        if r.status_code != 200:
+            log.debug("A2A /run returned %d", r.status_code)
+            return None
+
+        # Step 4: Extract JSON from agent response text
+        events = r.json()
+        for ev in reversed(events):
+            for part in ev.get("content", {}).get("parts", []):
+                text = part.get("text", "")
+                if not text:
+                    continue
+                # Find JSON block in the response
+                start = text.find("{")
+                end = text.rfind("}") + 1
+                if start >= 0 and end > start:
+                    try:
+                        data = json.loads(text[start:end])
+                        result = {
+                            "resources":      data.get("resources", []),
+                            "eta_minutes":    int(data.get("eta_minutes", 0)),
+                            "depot_name":     data.get("primary_hub", ""),
+                            "depot_org":      data.get("org", ""),
+                            "transport_mode": data.get("transport_mode", "air"),
+                            "convoys":        data.get("convoys", []),
+                        }
+                        log.info("A2A logistics allocation received: %s", result)
+                        return result
+                    except json.JSONDecodeError:
+                        continue
+
+        log.debug("A2A response had no parseable JSON allocation")
+        return None
+
     except Exception as exc:
         log.debug("A2A logistics specialist unavailable: %s", exc)
-    return None
+        return None
 
 
 def _run_local_allocation(tool_context: ToolContext, event, ev_type: str, severity_score: int) -> str:

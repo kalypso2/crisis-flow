@@ -1,0 +1,48 @@
+{
+  "name": "CrisisFlow",
+  "description": "Autonomous multi-agent disaster response system. Ingests live crisis signals from USGS, NOAA, GDACS, and NASA EONET, processes them through a 9-agent AI pipeline powered by Google Gemini, allocates humanitarian aid from 6 real UN depots, and self-corrects its own severity assessments using a LoopAgent feedback mechanism.",
+  "url": "http://localhost:8001",
+  "version": "1.0.0",
+  "documentationUrl": "https://github.com/crisisflow/crisisflow",
+  "provider": {
+    "organization": "CrisisFlow",
+    "url": "http://localhost:8001"
+  },
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false,
+    "stateTransitionHistory": true
+  },
+  "authentication": {
+    "schemes": ["none"]
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "skills": [
+    {
+      "id": "process_crisis_events",
+      "name": "Process Latest Crisis Events",
+      "description": "Fetches live data from 4 global crisis APIs in parallel, selects the highest-severity active event, runs a 7-stage analysis pipeline (detection, classification, severity scoring, resource allocation, coordination, simulation, storage), then self-corrects the response via a reflection loop until the allocation is appropriate.",
+      "tags": ["disaster-response", "humanitarian", "crisis", "UN", "USGS", "NOAA", "GDACS", "EONET"],
+      "examples": [
+        "Process the latest crisis events.",
+        "What disasters are happening right now?",
+        "Allocate humanitarian aid for the current worst crisis."
+      ],
+      "inputModes": ["text/plain"],
+      "outputModes": ["text/plain"]
+    },
+    {
+      "id": "allocate_aid",
+      "name": "Allocate Humanitarian Aid",
+      "description": "Delegates to the A2A Logistics Specialist agent (port 8002) to determine optimal aid allocation from 6 UNHRD depots. Selects hubs based on proximity, specialization, and live inventory levels.",
+      "tags": ["logistics", "UNHRD", "aid-allocation", "convoy", "humanitarian"],
+      "examples": [
+        "Allocate aid for a magnitude 7 earthquake in Nepal.",
+        "Which UN hubs should respond to a cyclone in Mozambique?"
+      ],
+      "inputModes": ["text/plain"],
+      "outputModes": ["text/plain"]
+    }
+  ]
+}

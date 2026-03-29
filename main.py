@@ -665,6 +665,27 @@ def health():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# A2A Agent Cards — served at /.well-known/agent.json per A2A protocol spec
+# ═══════════════════════════════════════════════════════════════════════════
+
+_ADK_DIR = os.path.join(os.path.dirname(__file__), "adk")
+
+@app.route("/.well-known/agent.json")
+def agent_card():
+    """Serve the CrisisFlow agent card for A2A discovery."""
+    card_path = os.path.join(_ADK_DIR, "crisisflow", "agent.json")
+    with open(card_path) as f:
+        return Response(f.read(), mimetype="application/json")
+
+@app.route("/.well-known/logistics-agent.json")
+def logistics_agent_card():
+    """Serve the Logistics Specialist agent card for A2A discovery."""
+    card_path = os.path.join(_ADK_DIR, "logistics_agent", "agent.json")
+    with open(card_path) as f:
+        return Response(f.read(), mimetype="application/json")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Entry point
 # ═══════════════════════════════════════════════════════════════════════════
 

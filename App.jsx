@@ -106,7 +106,7 @@ function EventCard({ ev, selected, onClick }) {
 }
 
 // ── Detail panel ──────────────────────────────────────────────────────────
-function DetailPanel({ ev, onClose }) {
+function DetailPanel({ ev, binEvents, onSelectBinEvent, onClose }) {
   if (!ev) return (
     <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--color-text-tertiary)", fontSize: 13 }}>
       Select an event to see details
@@ -115,7 +115,38 @@ function DetailPanel({ ev, onClose }) {
 
   const alloc = ev.allocation || {};
   return (
-    <div style={{ flex: 1, padding: 20, overflowY: "auto" }}>
+    <div style={{ flex: 1, overflowY: "auto" }}>
+      {/* Bin picker — shown only when a hex with multiple events is clicked */}
+      {binEvents && binEvents.length > 1 && (
+        <div style={{ borderBottom: "0.5px solid var(--color-border-tertiary)" }}>
+          <div style={{ padding: "8px 14px 4px", fontSize: 10, letterSpacing: "0.08em", color: "var(--color-text-tertiary)", textTransform: "uppercase" }}>
+            {binEvents.length} events in this area
+          </div>
+          <div style={{ maxHeight: 160, overflowY: "auto" }}>
+            {binEvents.map(binEv => (
+              <div
+                key={binEv.id}
+                onClick={() => onSelectBinEvent(binEv)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 8,
+                  padding: "6px 14px", cursor: "pointer",
+                  background: binEv.id === ev.id ? "var(--color-background-secondary)" : "transparent",
+                  borderLeft: binEv.id === ev.id ? "2px solid var(--color-text-info)" : "2px solid transparent",
+                  fontSize: 12,
+                }}
+              >
+                <span>{TYPE_EMOJI[binEv.type] || "📍"}</span>
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--color-text-primary)" }}>
+                  {binEv.title}
+                </span>
+                <SevBadge sev={binEv.severity} />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={{ padding: 20 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
         <div>
           <div style={{ fontSize: 18, fontWeight: 500, color: "var(--color-text-primary)", marginBottom: 4 }}>
@@ -174,6 +205,7 @@ function DetailPanel({ ev, onClose }) {
         <Row label="Status">{ev.status}</Row>
         <Row label="Confidence">{(ev.confidence * 100).toFixed(0)}%</Row>
       </Section>
+      </div>
     </div>
   );
 }
@@ -286,12 +318,12 @@ function GlobePanel({ events, onSelect }) {
           hexBinPointLat="lat"
           hexBinPointLng={d => d.lon}
           hexBinPointWeight={d => d.severity || 1}
-          hexBinResolution={3}
+          hexBinResolution={4}
           hexTopColor={d => TYPE_COLOR[dominantType(d)] || "#888888"}
           hexSideColor={d => (TYPE_COLOR[dominantType(d)] || "#888888") + "99"}
           hexAltitude={d => d.sumWeight * 0.008}
           hexBinMerge={false}
-          onHexClick={hex => onSelect?.(hex.points[0])}
+          onHexClick={hex => onSelect?.(hex.points)}
           arcsData={arcsData}
           arcColor={a => a.color}
           arcStroke={0.6}
@@ -423,6 +455,7 @@ function normalizeRow(row, fallbackType) {
 export default function App() {
   const [events, setEvents] = useState([]);
   const [selected, setSelected] = useState(null);
+  const [selectedBin, setSelectedBin] = useState(null); // all events in a clicked hex bin
   const [health, setHealth] = useState(null);
   const [connected, setConnected] = useState(false);
   const [filter, setFilter] = useState("all");
@@ -552,7 +585,7 @@ export default function App() {
                 key={ev.id}
                 ev={ev}
                 selected={selected?.id === ev.id}
-                onClick={() => setSelected(ev)}
+                onClick={() => { setSelectedBin(null); setSelected(ev); }}
               />
             ))}
           </div>
@@ -561,7 +594,19 @@ export default function App() {
 
         {/* Globe + detail */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-          <GlobePanel events={displayedEvents} onSelect={setSelected} />
+          <GlobePanel
+            events={displayedEvents}
+            onSelect={points => {
+              // hex click passes an array; list click passes a single event
+              if (Array.isArray(points)) {
+                setSelectedBin(points.length > 1 ? points : null);
+                setSelected(points[0] ?? null);
+              } else {
+                setSelectedBin(null);
+                setSelected(points);
+              }
+            }}
+          />
         </div>
 
         {/* Detail panel */}
@@ -570,7 +615,12 @@ export default function App() {
             width: 340, borderLeft: "0.5px solid var(--color-border-tertiary)",
             overflowY: "auto", display: "flex", flexDirection: "column",
           }}>
-            <DetailPanel ev={selected} onClose={() => setSelected(null)} />
+            <DetailPanel
+              ev={selected}
+              binEvents={selectedBin}
+              onSelectBinEvent={ev => setSelected(ev)}
+              onClose={() => { setSelected(null); setSelectedBin(null); }}
+            />
           </div>
         )}
       </div>

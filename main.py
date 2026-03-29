@@ -410,9 +410,31 @@ def ingest_static_acled_once():
 # Flask API
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _dedup_events(events: list[dict]) -> list[dict]:
+    """
+    Remove duplicate events that share the same (title, date).
+    Timestamp is truncated to date-only so that events polled multiple times
+    on the same day (e.g. NOAA uses _utcnow()) are treated as identical.
+    Keeps the first occurrence of each unique (title, date) pair.
+    """
+    seen: set[tuple] = set()
+    deduped: list[dict] = []
+    for ev in events:
+        title = (ev.get("title") or ev.get("TITLE") or "").strip()
+        ts = ev.get("timestamp") or ev.get("TIMESTAMP") or ""
+        # Normalise to date-only string: works for datetime objects and ISO strings
+        date_str = str(ts)[:10]  # "YYYY-MM-DD"
+        key = (title, date_str)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(ev)
+    return deduped
+
+
 @app.route("/events")
 def get_events():
-    """All events across all Snowflake tables, combined."""
+    """All events across all Snowflake tables, combined and deduplicated."""
     try:
         all_events = []
         for event_type in snowflake_store.TYPE_TO_TABLE:
@@ -420,10 +442,10 @@ def get_events():
             for r in rows:
                 r["type"] = event_type
             all_events.extend(rows)
-        return jsonify(all_events)
+        return jsonify(_dedup_events(all_events))
     except Exception:
         with _lock:
-            return jsonify(list(processed_events))
+            return jsonify(_dedup_events(list(processed_events)))
 
 
 @app.route("/quarantine")

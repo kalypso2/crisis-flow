@@ -66,6 +66,7 @@ class CrisisEvent:
             "consensus_flag": self.consensus_flag,
             "allocation": self.allocation,
             "agent_reasoning": self.agent_reasoning,
+            "raw": self.raw,
         }
 
 

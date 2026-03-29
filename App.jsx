@@ -578,7 +578,7 @@ function InventoryBar({ inventory, selectedHubName, onHubClick }) {
 }
 
 // Detail panel: omit radius for feeds where it is a fixed placeholder, not a derived impact zone.
-const DETAIL_HIDE_RADIUS_SOURCES = new Set(["eonet", "acled", "gdacs", "noaa", "twitter"]);
+const DETAIL_HIDE_RADIUS_SOURCES = new Set(["eonet", "gdacs", "noaa"]);
 
 // ── Detail panel ──────────────────────────────────────────────────────────
 function DetailPanel({ ev, binEvents, onSelectBinEvent, onClose, distResult, onAidClick }) {

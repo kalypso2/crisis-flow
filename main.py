@@ -38,7 +38,6 @@ from schema import CrisisEvent
 from need_calculator import scrub_event_allocation_need_notes
 from adapters import (
     USGSAdapter, NOAAAdapter, GDACSAdapter, EONETAdapter,
-    ACLEDAdapter,
 )
 from agents import (
     DetectionAgent, ClassificationAgent, SeverityAgent,
@@ -496,7 +495,6 @@ def start_ingestion_threads():
         (NOAAAdapter(),  300, "NOAA"),
         (GDACSAdapter(), 600, "GDACS"),
         (EONETAdapter(), 300, "EONET"),
-        (ACLEDAdapter(), 900, "ACLED"),
     ]
     for adapter, interval, name in sources:
         t = threading.Thread(
@@ -508,79 +506,6 @@ def start_ingestion_threads():
 
 
 
-def ingest_static_acled_once():
-    """
-    Load static ACLED markers and enqueue them through the full agent pipeline.
-
-    Prefers data/acled_globe_markers_refined.json (timestamp-corrected by
-    timestamp_agent.py) over the raw data/acled_globe_markers.json.
-    Run `python3 timestamp_agent.py` once before starting the app to produce
-    the refined file with accurate per-incident timestamps.
-    """
-    base = Path(__file__).resolve().parent / "data"
-    refined_path  = base / "acled_globe_markers_refined.json"
-    original_path = base / "acled_globe_markers.json"
-
-    if refined_path.exists():
-        path = refined_path
-        log.info("ACLED static: using timestamp-refined file (%s)", refined_path.name)
-    else:
-        path = original_path
-        log.info(
-            "ACLED static: refined file not found — using original (%s). "
-            "Run `python3 timestamp_agent.py` to generate accurate timestamps.",
-            original_path.name,
-        )
-
-    if not path.exists():
-        log.warning("ACLED static file missing: %s", path)
-        return
-
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            rows = json.load(f)
-    except Exception as exc:
-        log.error("Failed reading ACLED static data: %s", exc)
-        return
-
-    if not isinstance(rows, list):
-        log.error("ACLED static payload is not a list: %s", path)
-        return
-
-    enqueued = 0
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        try:
-            ts = row.get("timestamp")
-            if isinstance(ts, str):
-                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            else:
-                ts = datetime.now(timezone.utc)
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-
-            event = CrisisEvent(
-                id=str(row.get("id") or f"ACLED-STATIC-{enqueued}"),
-                source="acled_static",
-                type=str(row.get("type") or "conflict"),
-                lat=float(row.get("lat") or 0.0),
-                lon=float(row.get("lon") or 0.0),
-                radius_km=float(row.get("radius_km") or 20.0),
-                location_name=str(row.get("admin1") or row.get("country") or ""),
-                severity=int(row.get("severity") or 3),
-                affected_population=int(row.get("affected_population") or 0),
-                timestamp=ts,
-                status=str(row.get("status") or "active"),
-                title=str(row.get("title") or "ACLED static conflict event"),
-                raw=row,
-            )
-            _enqueue(event)
-            enqueued += 1
-        except Exception as exc:
-            log.warning("Skipping malformed ACLED static row: %s", exc)
-
-    log.info("ACLED static: enqueued %d events", enqueued)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -652,22 +577,6 @@ def get_inventory():
     return jsonify(result)
 
 
-@app.route("/acled-static")
-def get_acled_static():
-    """Serve ACLED conflict zones from Snowflake CONFLICTS table."""
-    try:
-        return jsonify(snowflake_store.get_conflicts(min_severity=1, limit=300))
-    except Exception as exc:
-        log.error("Snowflake ACLED query failed, falling back to JSON: %s", exc)
-        path = Path(__file__).resolve().parent / "data" / "acled_globe_markers.json"
-        if not path.exists():
-            return jsonify([])
-        try:
-            with path.open("r", encoding="utf-8") as f:
-                return jsonify(json.load(f))
-        except Exception:
-            return jsonify([])
-
 
 @app.route("/stream")
 def sse_stream():
@@ -731,10 +640,6 @@ def distribute():
 @app.route("/snowflake/<event_type>")
 def sf_by_type(event_type):
     """Query a specific event-type table. e.g. /snowflake/earthquake"""
-    if event_type == "conflict":
-        min_sev = int(request.args.get("min_severity", 1))
-        limit = min(int(request.args.get("limit", 50)), 100)
-        return jsonify(snowflake_store.get_conflicts(min_sev, limit))
     limit = min(int(request.args.get("limit", 50)), 100)
     return jsonify(snowflake_store.get_table(event_type, limit))
 

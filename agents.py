@@ -137,7 +137,6 @@ class ClassificationAgent:
       NOAA   → maps NWS event string to type (see NOAA_EVENT_MAP)
       GDACS  → reads eventtype field (EQ/FL/TC/VO/WF/DR)
       EONET  → reads categories[0].id
-      ACLED  → maps event_type string
 
     Domain tags enrich the event for the allocation agent:
       earthquake  → ["seismic", "infrastructure_risk", "aftershock_risk"]
@@ -194,15 +193,6 @@ class ClassificationAgent:
             if raw_event in self.NOAA_TYPE_MAP:
                 ev_type, tags = self.NOAA_TYPE_MAP[raw_event]
                 reason = f"noaa event '{raw_event}' mapped to '{ev_type}'"
-
-        # ── Refine ACLED using sub_event_type ─────────────────────────────
-        if event.source == "acled":
-            sub = event.raw.get("sub_event_type", "")
-            if "drone" in sub.lower() or "air" in sub.lower():
-                tags = ["civilian_risk", "humanitarian_corridor", "aerial_strike"]
-            elif "explosion" in sub.lower():
-                tags = ["civilian_risk", "infrastructure_risk"]
-            reason = f"acled sub_event_type '{sub}' classified as conflict"
 
         result = ClassificationResult(
             agent_name="classification",
@@ -295,9 +285,6 @@ class SeverityAgent:
       Drought (GDACS):
         always 2 (slow-onset, not acute)
 
-      Conflict (ACLED fatalities):
-        0→2 | 1–10→3 | 11–50→4 | 50+→5
-
       Population bonus:
         affected_population > 100,000 → +1 (capped at 5)
 
@@ -336,14 +323,6 @@ class SeverityAgent:
             # Override event.severity so the consensus weighted average uses correct base
             event.severity = score
             reason_parts.append(f"gdacs alertlevel={alert} type={ev_type} score={score}")
-
-        elif event.source == "acled":
-            fatalities = int(raw.get("fatalities") or 0)
-            if fatalities == 0:        score = 2
-            elif fatalities <= 10:     score = 3
-            elif fatalities <= 50:     score = 4
-            else:                      score = 5
-            reason_parts.append(f"acled fatalities={fatalities} score={score}")
 
         # Population bonus
         pop_bonus = 0

@@ -48,14 +48,6 @@ SOURCE OVERVIEW
     Key fields: categories[0].id (wildfires/severeStorms/volcanoes/icebergs),
                 geometry[0].coordinates [lon, lat], title
 
-  ACLED
-    URL  : https://api.acleddata.com/acled/read
-    Auth : API key + email (free registration at acleddata.com)
-    Data : JSON, data array of conflict events
-    Poll : every 5 min
-    Key fields: event_type, sub_event_type, country, latitude, longitude,
-                fatalities, actor1, actor2, notes, event_date
-
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -115,16 +107,6 @@ def _request_without_env_proxy(method: str, url: str, **kwargs):
     with requests.Session() as session:
         session.trust_env = False
         return session.request(method, url, **kwargs)
-
-ACLED_TYPE_MAP = {
-    "Battles": "conflict",
-    "Explosions/Remote violence": "conflict",
-    "Violence against civilians": "conflict",
-    "Protests": "conflict",
-    "Riots": "conflict",
-    "Strategic developments": "conflict",
-}
-
 
 # ── USGS Earthquakes ──────────────────────────────────────────────────────
 
@@ -439,65 +421,4 @@ class EONETAdapter:
         return events
 
 
-# ── ACLED Conflicts ───────────────────────────────────────────────────────
-
-class ACLEDAdapter:
-    """
-    Downloads recent armed conflict events from ACLED.
-    Requires free API key from acleddata.com.
-    Covers: battles, explosions/remote violence, drone strikes, civilian targeting.
-    """
-
-    def __init__(self):
-        self.api_key = os.getenv("ACLED_API_KEY", "")
-        self.email = os.getenv("ACLED_EMAIL", "")
-
-    def fetch(self) -> list[CrisisEvent]:
-        if not self.api_key:
-            log.warning("ACLED: no API key — skipping")
-            return []
-
-        today = datetime.utcnow().strftime("%Y-%m-%d")
-        url = (
-            f"https://api.acleddata.com/acled/read"
-            f"?key={self.api_key}&email={self.email}"
-            f"&event_date={today}&event_date_where=BETWEEN"
-            f"&limit=50&fields=event_type|sub_event_type|country|"
-            f"latitude|longitude|fatalities|actor1|notes|event_date"
-        )
-
-        try:
-            r = requests.get(url, timeout=15)
-            r.raise_for_status()
-            items = r.json().get("data", [])
-        except Exception as e:
-            log.error("ACLED fetch failed: %s", e)
-            return []
-
-        events = []
-        for item in items:
-            fatalities = int(item.get("fatalities", 0) or 0)
-            if fatalities == 0:        sev = 2
-            elif fatalities <= 10:     sev = 3
-            elif fatalities <= 50:     sev = 4
-            else:                      sev = 5
-
-            lat = float(item.get("latitude") or 0)
-            lon = float(item.get("longitude") or 0)
-            ev_type = ACLED_TYPE_MAP.get(item.get("event_type", ""), "conflict")
-
-            events.append(CrisisEvent(
-                source="acled",
-                type=ev_type,
-                lat=lat,
-                lon=lon,
-                radius_km=20.0,
-                location_name=item.get("country", ""),
-                severity=sev,
-                timestamp=_utcnow(),
-                title=f"{item.get('sub_event_type','Conflict event')} — {item.get('country','')}",
-                raw=item,
-            ))
-        log.info("ACLED: fetched %d events", len(events))
-        return events
 

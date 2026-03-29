@@ -8,7 +8,7 @@ CrisisFlow is a multi-agent AI pipeline that ingests live crisis signals from gl
 
 ```
 Live Data Sources
-  USGS · NOAA · GDACS · EONET · ACLED
+  USGS · NOAA · GDACS · EONET
           │
           ▼
    Priority Queue  (severity-ordered, deduplicated)
@@ -45,7 +45,6 @@ Every agent runs with a **45-second timeout** and degrades gracefully — if Gem
 | **NOAA** | 300 s | Active NWS weather alerts — hurricanes, tornadoes, floods |
 | **GDACS** | 600 s | Global Disaster Alert — cyclones, volcanoes, droughts |
 | **EONET** | 300 s | NASA natural events — wildfires, icebergs, sea/lake ice |
-| **ACLED** | 900 s | Armed conflict events (requires API key) |
 
 All sources are normalized into a shared `CrisisEvent` schema before entering the pipeline. Events with placeholder coordinates `(0, 0)` or invalid lat/lon are **quarantined** and never processed.
 
@@ -95,7 +94,6 @@ Produces a 1–5 severity score using source-specific rules:
 | USGS | Magnitude: 4.x→2, 5.x→3, 6.x→4, 7+→5; PAGER orange +1, red +2 |
 | NOAA | Severity string: Minor→1 · Moderate→2 · Severe→3 · Extreme→4; Immediate urgency +1 |
 | GDACS | Alert level: green→2 · orange→3 · red→4 |
-| ACLED | Fatalities: 0→2 · 1–10→3 · 11–50→4 · 50+→5 |
 | All | Affected population > 100,000 → +1 bonus (capped at 5) |
 
 Gemini then validates the rule score considering urban/rural context, population density, and infrastructure vulnerability. AI score is only adopted if confidence ≥ 0.75 and within 1 point of the rule score.
@@ -268,7 +266,6 @@ All agents use a single `ClaudeManager` wrapper with `.call(prompt)` interface. 
 | `POST` | `/distribute` | Run a week-long aid simulation on a set of events |
 | `GET` | `/convoys` | Recent convoy dispatch records |
 | `GET` | `/quarantine` | Events rejected at ingestion |
-| `GET` | `/acled-static` | Conflict zones from Snowflake |
 | `GET` | `/snowflake/summary` | Row counts per event table |
 | `GET` | `/snowflake/<type>` | e.g. `/snowflake/earthquake` |
 
@@ -321,8 +318,6 @@ Both must be running simultaneously. The React app calls the Flask API on port 8
 | `SNOWFLAKE_DATABASE` | No | Default: `CRISISFLOW` |
 | `SNOWFLAKE_SCHEMA` | No | Default: `PUBLIC` |
 | `SNOWFLAKE_WAREHOUSE` | No | Default: `COMPUTE_WH` |
-| `ACLED_API_KEY` | No | Required for live conflict data |
-| `ACLED_EMAIL` | No | Required for live conflict data |
 
 ---
 
@@ -341,5 +336,5 @@ Both must be running simultaneously. The React app calls the Flask API on port 8
 | [depot_inventory.py](depot_inventory.py) | Live UNHRD hub inventory, commit/replenishment |
 | [need_calculator.py](need_calculator.py) | Aid quantity calculation by event type + population |
 | [distribution_engine.py](distribution_engine.py) | Week-simulation engine for `POST /distribute` |
-| [adapters.py](adapters.py) | USGS, NOAA, GDACS, EONET, ACLED — fetch + normalize |
+| [adapters.py](adapters.py) | USGS, NOAA, GDACS, EONET — fetch + normalize |
 | [App.jsx](src/App.jsx) | React dashboard — 3D globe, filters, panels, timeline |

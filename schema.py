@@ -16,11 +16,11 @@ import uuid
 class CrisisEvent:
     # ── Identity ──────────────────────────────────────────────────────────
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    source: str = ""          # usgs | noaa | gdacs | eonet | acled | twitter
+    source: str = ""          # usgs | noaa | gdacs | eonet
 
     # ── Classification ────────────────────────────────────────────────────
     type: str = "unknown"     # earthquake | flood | cyclone | volcano |
-                              # wildfire | drought | storm | conflict | iceberg
+                              # wildfire | drought | storm | iceberg
     domain_tags: list[str] = field(default_factory=list)
 
     # ── Location ──────────────────────────────────────────────────────────

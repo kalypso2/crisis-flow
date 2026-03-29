@@ -7,9 +7,9 @@ Loaded by ``crisisflow.app`` and ``response_coordinator.app`` so ``adk web``,
 Uses an asyncio Lock to serialize LLM calls — critical when ParallelAgent
 fires multiple sub-agents that would otherwise burst past RPM limits.
 
-Model fallback: when a key's primary model (gemini-2.5-flash-lite) is
+Model fallback: when a key's primary model (gemini-2.5-flash) is
 exhausted, the plugin rewrites ``llm_request.model`` to the fallback
-(gemini-2.5-flash) transparently — doubling effective RPD per key.
+(gemini-2.5-flash-lite) transparently — doubling effective RPD per key.
 
 Set ``ADK_PRE_LLM_SLEEP_SECONDS`` (optional, default 3) to space calls apart.
 """
@@ -88,17 +88,30 @@ class GeminiKeyRotationPlugin(BasePlugin):
     ):
         err = llm_response.error_code or ""
         msg = llm_response.error_message or ""
-        is_429 = "429" in str(err) or "RESOURCE_EXHAUSTED" in str(err) or "RESOURCE_EXHAUSTED" in msg
+        err_str = str(err) + msg
 
-        if is_429:
-            idx = _ctx_key_idx.get(-1)
-            model = _ctx_model.get("")
-            if idx >= 0 and model:
-                from gemini_manager import get_manager
-                manager = get_manager()
-                manager.mark_model_exhausted(idx, model, seconds=3600)
-                log.warning(
-                    "429 detected in response — marked key #%d model %s exhausted",
-                    idx, model,
-                )
+        is_429 = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
+        is_suspended = "PERMISSION_DENIED" in err_str or "CONSUMER_SUSPENDED" in err_str or "403" in err_str
+
+        idx = _ctx_key_idx.get(-1)
+        model = _ctx_model.get("")
+
+        if is_suspended and idx >= 0:
+            from gemini_manager import get_manager, PRIMARY_MODEL, FALLBACK_MODEL
+            manager = get_manager()
+            for m in (PRIMARY_MODEL, FALLBACK_MODEL):
+                manager.mark_model_exhausted(idx, m, seconds=86400 * 365)
+            log.error(
+                "403 PERMISSION_DENIED — key #%d permanently suspended, "
+                "marked exhausted for 1 year",
+                idx,
+            )
+        elif is_429 and idx >= 0 and model:
+            from gemini_manager import get_manager
+            manager = get_manager()
+            manager.mark_model_exhausted(idx, model, seconds=3600)
+            log.warning(
+                "429 detected in response — marked key #%d model %s exhausted",
+                idx, model,
+            )
         return None

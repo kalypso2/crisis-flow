@@ -31,6 +31,26 @@ log = logging.getLogger("crisisflow.mcp")
 
 mcp = FastMCP("CrisisFlow Disaster Intelligence")
 
+
+def _inventory_api_base() -> str:
+    return os.environ.get("CRISISFLOW_INVENTORY_API_BASE", "").strip().rstrip("/")
+
+
+def _flask_inventory_rows() -> list | None:
+    """When CRISISFLOW_INVENTORY_API_BASE is set, mirror Flask /inventory (live commits)."""
+    base = _inventory_api_base()
+    if not base:
+        return None
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(f"{base}/inventory", timeout=90) as r:
+            data = json.loads(r.read().decode())
+        return data if isinstance(data, list) else None
+    except Exception as exc:
+        log.warning("CRISISFLOW_INVENTORY_API_BASE fetch failed: %s", exc)
+        return None
+
 MARKERS_PATH = ROOT / "data" / "acled_globe_markers.json"
 FLAT_PATH = ROOT / "data" / "acled_90d_violence_flat.json"
 
@@ -126,17 +146,22 @@ def list_regions() -> str:
 
 
 @mcp.tool
-def query_disaster_events(event_type: str, limit: int = 10) -> str:
+def query_disaster_events(
+    event_type: str, limit: int = 10, unenriched_only: bool = False
+) -> str:
     """Query recent disaster events from Snowflake by type.
 
-    Returns events that have NOT yet been AI-enriched, ordered by severity
-    (highest first). Each event includes id, title, lat, lon, severity,
-    timestamp, source, location_name, domain_tags, and action_summary.
+    Returns the highest-severity events first. Each row includes id, title,
+    lat, lon, severity, timestamp, source, location_name, domain_tags, and
+    action_summary.
 
     Args:
         event_type: One of: earthquake, flood, storm, cyclone, wildfire,
                     volcano, drought, iceberg.
         limit: Max events to return (default 10, max 20).
+        unenriched_only: If True, only rows where enrichment is not complete
+            (pipeline queue). If False (default), return top events regardless
+            of enrichment so IDs always match Snowflake rows used by the UI.
     """
     table = TYPE_TO_TABLE.get(event_type)
     if not table:
@@ -147,12 +172,17 @@ def query_disaster_events(event_type: str, limit: int = 10) -> str:
         import snowflake.connector
         conn = _get_snowflake_conn()
         cur = conn.cursor(snowflake.connector.DictCursor)
+        where = (
+            "WHERE ENRICHMENT_STATUS IS NULL OR ENRICHMENT_STATUS != 'complete'"
+            if unenriched_only
+            else ""
+        )
         cur.execute(f"""
             SELECT ID, TITLE, LAT, LON, SEVERITY, TIMESTAMP, SOURCE,
                    LOCATION_NAME, DOMAIN_TAGS, ACTION_SUMMARY,
                    AFFECTED_POPULATION, RADIUS_KM
             FROM {table}
-            WHERE ENRICHMENT_STATUS IS NULL OR ENRICHMENT_STATUS != 'complete'
+            {where}
             ORDER BY SEVERITY DESC, TIMESTAMP DESC
             LIMIT %s
         """, (limit,))
@@ -355,6 +385,35 @@ def get_depot_inventory() -> str:
     """
     try:
         import depot_inventory as inv
+
+        rows = _flask_inventory_rows()
+        if rows is not None:
+            baselines = inv.get_all_baselines()
+            result = {}
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                hub_name = row.get("hub_name")
+                if not hub_name:
+                    continue
+                stock = row.get("stock") or {}
+                base = row.get("baseline") or baselines.get(hub_name, {})
+                pct = {}
+                for item, qty in stock.items():
+                    b = base.get(item, 0)
+                    try:
+                        qn = float(qty)
+                    except (TypeError, ValueError):
+                        qn = 0
+                    pct[item] = round(qn / b * 100, 1) if b > 0 else 0
+                result[hub_name] = {
+                    "current_stock": stock,
+                    "baseline": base,
+                    "fill_pct": pct,
+                    "status": row.get("stock_level") or "unknown",
+                }
+            return json.dumps({"depots": result, "count": len(result)})
+
         inventory = inv.get_inventory()
         baselines = inv.get_all_baselines()
         result = {}
@@ -394,15 +453,30 @@ def get_nearest_depots(lat: float, lon: float, top_n: int = 3) -> str:
         import depot_inventory as inv
 
         top_n = min(int(top_n), 6)
-        inventory = inv.get_inventory()
+        rows = _flask_inventory_rows()
+        if rows is not None:
+            inventory = {
+                r["hub_name"]: r.get("stock") or {}
+                for r in rows
+                if isinstance(r, dict) and r.get("hub_name")
+            }
+            level_by_hub = {
+                r["hub_name"]: r.get("stock_level") or "unknown"
+                for r in rows
+                if isinstance(r, dict) and r.get("hub_name")
+            }
+        else:
+            inventory = inv.get_inventory()
+            level_by_hub = {}
 
         hubs_with_dist = []
         for hub in hub_agents.HUBS:
             dist_km = _haversine_km(lat, lon, hub["lat"], hub["lon"])
             # Air ETA: assume 800 km/h cruise + 2h ground/loading
             eta_h = round(dist_km / 800 + 2, 1)
-            stock_status = inv.stock_level(hub["name"])
-            current = inventory.get(hub["name"], {})
+            hname = hub["name"]
+            stock_status = level_by_hub.get(hname) if level_by_hub else inv.stock_level(hname)
+            current = inventory.get(hname, {})
             hubs_with_dist.append({
                 "name": hub["name"],
                 "org": hub["org"],

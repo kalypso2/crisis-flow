@@ -9,6 +9,12 @@ Exposes:
     GET  /events        — last 100 processed events (JSON)
     GET  /stream        — Server-Sent Events stream of new events
     GET  /health        — agent health / circuit-breaker status
+    GET  /pipeline/status
+    POST /pipeline/poll-sources   — manual one-shot ingest (when auto pipeline off)
+    POST /pipeline/process-next   — run agent pipeline on one queued event
+
+Background ingestion + consumer are OFF by default. Set CRISISFLOW_AUTO_PIPELINE=1 to restore
+continuous polling (stock will deplete as events are processed).
 """
 
 from __future__ import annotations
@@ -53,6 +59,17 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
 )
 log = logging.getLogger("pipeline.main")
+
+
+def _env_truthy(key: str, *, default: bool = False) -> bool:
+    v = os.environ.get(key, "").strip().lower()
+    if not v:
+        return default
+    return v in ("1", "true", "yes", "on")
+
+
+# Default OFF: no automatic ingest or agent runs — use POST /pipeline/* from the API or dashboard.
+AUTO_PIPELINE = _env_truthy("CRISISFLOW_AUTO_PIPELINE", default=False)
 
 app = Flask(__name__)
 CORS(app)
@@ -367,6 +384,36 @@ def process_event(event: CrisisEvent) -> Optional[dict]:
     return result
 
 
+def _publish_processed_event(result: dict) -> None:
+    """Append to ring buffer, notify SSE subscribers, persist to Snowflake."""
+    with _lock:
+        processed_events.append(result)
+        if len(processed_events) > PROCESSED_LIMIT:
+            processed_events.pop(0)
+        dead = []
+        for q in sse_subscribers:
+            try:
+                q.put_nowait(result)
+            except queue.Full:
+                dead.append(q)
+        for q in dead:
+            sse_subscribers.remove(q)
+
+    try:
+        snowflake_store.store_event(result)
+        convoys = (result.get("allocation") or {}).get("convoys") or []
+        if convoys:
+            snowflake_store.store_convoys(
+                event_id=result.get("id", ""),
+                event_type=result.get("type", "unknown"),
+                event_lat=float(result.get("lat", 0)),
+                event_lon=float(result.get("lon", 0)),
+                convoys=convoys,
+            )
+    except Exception as exc:
+        log.warning("Snowflake store failed (non-fatal): %s", exc)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Consumer thread — drains the queue and runs the pipeline
 # ═══════════════════════════════════════════════════════════════════════════
@@ -382,32 +429,7 @@ def consumer_thread():
         if result is None:
             continue
 
-        with _lock:
-            processed_events.append(result)
-            if len(processed_events) > PROCESSED_LIMIT:
-                processed_events.pop(0)
-            dead = []
-            for q in sse_subscribers:
-                try:
-                    q.put_nowait(result)
-                except queue.Full:
-                    dead.append(q)
-            for q in dead:
-                sse_subscribers.remove(q)
-
-        try:
-            snowflake_store.store_event(result)
-            convoys = (result.get("allocation") or {}).get("convoys") or []
-            if convoys:
-                snowflake_store.store_convoys(
-                    event_id=result.get("id", ""),
-                    event_type=result.get("type", "unknown"),
-                    event_lat=float(result.get("lat", 0)),
-                    event_lon=float(result.get("lon", 0)),
-                    convoys=convoys,
-                )
-        except Exception as exc:
-            log.warning("Snowflake store failed (non-fatal): %s", exc)
+        _publish_processed_event(result)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -577,6 +599,100 @@ def get_inventory():
     return jsonify(result)
 
 
+@app.route("/inventory/commit", methods=["POST"])
+def inventory_commit():
+    """Deduct hub stock. Used when ADK sets CRISISFLOW_INVENTORY_API_BASE to this API."""
+    import depot_inventory as _inv
+
+    data = request.get_json(silent=True) or {}
+    hub = (data.get("hub_name") or "").strip()
+    quantities = data.get("quantities") or {}
+    if not hub or not isinstance(quantities, dict):
+        return jsonify({"error": "hub_name and quantities object required"}), 400
+    clean: dict[str, int] = {}
+    for k, v in quantities.items():
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            clean[str(k)] = n
+    deducted = _inv.commit(hub, clean)
+    return jsonify({"deducted": deducted})
+
+
+@app.route("/pipeline/status", methods=["GET"])
+def pipeline_status():
+    """Whether automatic polling is enabled, and how many events wait in the queue."""
+    return jsonify({
+        "auto_pipeline": AUTO_PIPELINE,
+        "queue_depth": event_queue.qsize(),
+        "processed_buffer_len": len(processed_events),
+    })
+
+
+@app.route("/pipeline/poll-sources", methods=["POST"])
+def pipeline_poll_sources():
+    """
+    One-shot fetch from USGS, NOAA, GDACS, EONET — enqueue deduplicated events.
+    Use when CRISISFLOW_AUTO_PIPELINE is not set.
+    """
+    specs = [
+        (USGSAdapter(), "USGS"),
+        (NOAAAdapter(), "NOAA"),
+        (GDACSAdapter(), "GDACS"),
+        (EONETAdapter(), "EONET"),
+    ]
+    fetched_per_source: dict = {}
+    for adapter, name in specs:
+        try:
+            evs = adapter.fetch()
+            fetched_per_source[name] = len(evs)
+            for e in evs:
+                _enqueue(e)
+        except Exception as exc:
+            log.error("%s manual poll error: %s", name, exc)
+            fetched_per_source[name] = f"error: {exc}"
+    return jsonify({
+        "ok": True,
+        "fetched_per_source": fetched_per_source,
+        "queue_depth": event_queue.qsize(),
+    })
+
+
+@app.route("/pipeline/process-next", methods=["POST"])
+def pipeline_process_next():
+    """
+    Pop one event from the queue and run the full agent pipeline (may commit depot stock).
+    """
+    try:
+        _priority, _counter, event = event_queue.get_nowait()
+    except queue.Empty:
+        return jsonify({
+            "ok": True,
+            "processed": False,
+            "message": "Queue is empty — POST /pipeline/poll-sources first.",
+            "queue_depth": 0,
+        })
+
+    result = process_event(event)
+    if result is None:
+        return jsonify({
+            "ok": True,
+            "processed": True,
+            "accepted": False,
+            "queue_depth": event_queue.qsize(),
+        })
+
+    _publish_processed_event(result)
+    return jsonify({
+        "ok": True,
+        "processed": True,
+        "accepted": True,
+        "queue_depth": event_queue.qsize(),
+        "event": result,
+    })
+
 
 @app.route("/stream")
 def sse_stream():
@@ -696,8 +812,15 @@ if __name__ == "__main__":
     snowflake_store.ensure_ai_columns()
     snowflake_store.ensure_convoys_table()
 
-    threading.Thread(target=consumer_thread, name="consumer", daemon=True).start()
-    start_ingestion_threads()
+    if AUTO_PIPELINE:
+        threading.Thread(target=consumer_thread, name="consumer", daemon=True).start()
+        start_ingestion_threads()
+        log.info("Automatic pipeline ENABLED (CRISISFLOW_AUTO_PIPELINE)")
+    else:
+        log.info(
+            "Automatic pipeline DISABLED — agents run only via POST /pipeline/poll-sources "
+            "and POST /pipeline/process-next (or set CRISISFLOW_AUTO_PIPELINE=1)"
+        )
 
     log.info("API server starting on http://0.0.0.0:8000")
     app.run(host="0.0.0.0", port=8000, threaded=True, use_reloader=False)

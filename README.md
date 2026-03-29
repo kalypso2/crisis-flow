@@ -305,6 +305,8 @@ npm run dev
 
 Both must be running simultaneously. The React app calls the Flask API on port 8000.
 
+**Pipeline mode:** By default, `main.py` does **not** start background ingestion or the agent consumer (so depot stock does not drain on its own). Use the dashboard buttons **Poll sources** / **Process next event**, or `POST /pipeline/poll-sources` and `POST /pipeline/process-next`. To restore the old continuous behaviour, set `CRISISFLOW_AUTO_PIPELINE=1` in `.env`.
+
 ---
 
 ## Environment Variables
@@ -318,6 +320,7 @@ Both must be running simultaneously. The React app calls the Flask API on port 8
 | `SNOWFLAKE_DATABASE` | No | Default: `CRISISFLOW` |
 | `SNOWFLAKE_SCHEMA` | No | Default: `PUBLIC` |
 | `SNOWFLAKE_WAREHOUSE` | No | Default: `COMPUTE_WH` |
+| `CRISISFLOW_AUTO_PIPELINE` | No | Set to `1` to enable continuous ingest + agent consumer; default is manual pipeline only |
 
 ---
 

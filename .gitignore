@@ -25,6 +25,9 @@ env/
 .env.*.local
 config/keys.env
 
+# Local key-rotation manager (uses free-tier key pool; Tommy uses paid key directly)
+gemini_manager.py
+
 # OS/editor noise
 .DS_Store
 .idea/

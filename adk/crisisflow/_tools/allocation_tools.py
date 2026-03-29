@@ -215,7 +215,7 @@ def get_inventory_status(tool_context: ToolContext) -> str:
             "Brindisi UNHRD", "Dubai UNHRD", "Accra UNHRD",
             "Kuala Lumpur UNHRD", "Panama City UNHRD", "Las Palmas UNHRD",
         ]:
-            stock = inv.get_inventory(hub_name)
+            stock = inv.get_hub_inventory(hub_name)
             if stock:
                 summary = ", ".join(
                     f"{k}={v}" for k, v in stock.items()

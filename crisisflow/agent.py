@@ -10,11 +10,13 @@ Architecture:
   ├── risk_assessment_loop    — LoopAgent (max 3) for self-correction
   │   ├── risk_validator      — checks impact estimates for reasonableness
   │   └── risk_corrector      — re-analyzes failures or calls exit_loop
-  ├── enrichment_agent        — writes AI analysis back to Snowflake
+  ├── enrichment_persist_agent — deterministic Snowflake save + hub commit
   └── briefing_agent          — intelligence briefing + A2A handoff
 """
 
 from __future__ import annotations
+
+import sys
 
 from google.adk.agents import LlmAgent, SequentialAgent, ParallelAgent, LoopAgent
 from google.adk.tools import exit_loop as adk_exit_loop
@@ -24,13 +26,16 @@ from mcp import StdioServerParameters
 from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
 from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset
 
+_PYTHON = sys.executable
+
+from .enrichment_persist_agent import EnrichmentPersistAgent
 from .tools import (
     validate_risk_assessment,
-    save_disaster_enrichment,
+    persist_intelligence_briefing,
     send_a2a_briefing,
 )
 
-MODEL = "gemini-2.5-flash-lite"
+MODEL = "gemini-2.5-flash"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. Data Prep — loads disaster events from Snowflake + nearby events via MCP
@@ -60,7 +65,7 @@ data_prep_agent = LlmAgent(
         MCPToolset(
             connection_params=StdioConnectionParams(
                 server_params=StdioServerParameters(
-                    command="python",
+                    command=_PYTHON,
                     args=["-m", "crisisflow_mcp.server"],
                 )
             )
@@ -100,7 +105,7 @@ weather_context_agent = LlmAgent(
         MCPToolset(
             connection_params=StdioConnectionParams(
                 server_params=StdioServerParameters(
-                    command="python",
+                    command=_PYTHON,
                     args=["-m", "crisisflow_mcp.server"],
                 )
             )
@@ -152,27 +157,31 @@ aid_context_agent = LlmAgent(
         "STEP 2: For EACH event, call get_nearest_depots(lat, lon, top_n=3) "
         "to identify the 3 closest depots and their air ETAs.\n\n"
         "STEP 3: For EACH event, call calculate_sphere_needs(event_type, "
-        "severity, affected_population) to compute Sphere-standard aid "
-        "quantities (shelter kits, food rations, medical kits, water kits, "
-        "vehicles) per the Sphere Handbook 2018.\n\n"
+        "severity, affected_population) using the event's severity and "
+        "affected_population. IMPORTANT: if affected_population is 0 or "
+        "missing, pass 0 — the tool will automatically apply a "
+        "severity-based default (sev 4 = 50,000 people, sev 3 = 10,000, "
+        "sev 5 = 200,000). Do NOT skip this step.\n\n"
         "STEP 4: For the country where each event occurred, call "
         "get_ocha_funding(country_name) to retrieve real historical "
         "humanitarian funding flows for that country from OCHA FTS.\n\n"
-        "Output a JSON array with one entry per event:\n"
-        '[{{"event_id":"...","nearest_depots":[{{"name":"...","distance_km":0,'
-        '"air_eta_hours":0,"stock_status":"high|medium|low|critical"}}],'
+        "Output a JSON array with one entry per event. Use the exact event "
+        "id from {event_data} as event_id:\n"
+        '[{{"event_id":"<exact id from event_data>","nearest_depots":[{{"name":"...",'
+        '"distance_km":0,"air_eta_hours":0,"stock_status":"high|medium|low|critical"}}],'
         '"sphere_needs":{{"shelter_kits":0,"food_rations":0,"medical_kits":0,'
         '"water_kits":0,"vehicles":0,"displaced":0,"window_days":0}},'
         '"ocha_funding_usd":0,"ocha_flow_count":0,'
         '"recommended_depot":"name of best depot",'
         '"logistics_notes":"1-2 sentences on feasibility"}},...]\n\n'
-        "Return ONLY the JSON array."
+        "Return ONLY the JSON array. Every event in {event_data} must have "
+        "an entry. Do not skip any event."
     ),
     tools=[
         MCPToolset(
             connection_params=StdioConnectionParams(
                 server_params=StdioServerParameters(
-                    command="python",
+                    command=_PYTHON,
                     args=["-m", "crisisflow_mcp.server"],
                 )
             )
@@ -195,15 +204,16 @@ risk_validator = LlmAgent(
     model=MODEL,
     instruction=(
         "You are a quality assurance specialist for disaster risk assessments.\n\n"
-        "Review the weather analysis in {weather_analysis} and impact "
-        "analysis in {impact_analysis} against the event data in "
-        "{event_data}.\n\n"
+        "Review session state: weather_analysis, impact_analysis, and "
+        "event_data.\n\n"
         "Call validate_risk_assessment to run programmatic checks. The tool "
         "will verify:\n"
+        "- Impact analysis exists for each event (required)\n"
         "- Population estimates are within plausible ranges\n"
-        "- Weather risk levels match the event type\n"
-        "- All events have been analyzed\n"
-        "- Impact severity aligns with event severity\n\n"
+        "- Impact severity aligns with event severity\n"
+        "- Weather analysis is optional when impact is present (parallel runs "
+        "may omit it); the tool reports weather_missing_nonblocking when "
+        "that happens\n\n"
         "The tool returns a pass/fail result with details."
     ),
     tools=[validate_risk_assessment],
@@ -215,13 +225,16 @@ risk_corrector = LlmAgent(
     model=MODEL,
     instruction=(
         "You are a risk assessment correction specialist.\n\n"
-        "The validation result is: {validation_result}\n\n"
-        "If ALL checks passed, call exit_loop immediately.\n\n"
+        "Review the validation_result in session state. "
+        "It contains a JSON object with 'all_passed', 'passed', 'failed', "
+        "and 'failed_events' fields from the previous RiskValidator step.\n\n"
+        "If all checks passed (all_passed=true or failed=0), call exit_loop immediately.\n\n"
         "If any checks FAILED, re-analyze the failed events:\n"
         "- Use Google Search to find better population/impact data.\n"
         "- Adjust impact_severity to match the evidence.\n"
         "- Then call exit_loop (corrections will be applied automatically).\n\n"
-        "Always call exit_loop when done."
+        "Always call exit_loop when done. If you are unsure or have no "
+        "validation context, call exit_loop immediately."
     ),
     tools=[
         GoogleSearchTool(bypass_multi_tools_limit=True),
@@ -237,26 +250,15 @@ risk_assessment_loop = LoopAgent(
 )
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 4. Enrichment — save everything to Snowflake
+# 4. Enrichment — save everything to Snowflake (deterministic; no LLM)
 # ═══════════════════════════════════════════════════════════════════════════
 
-enrichment_agent = LlmAgent(
-    name="EnrichmentAgent",
-    model=MODEL,
-    instruction=(
-        "You are a data persistence specialist for CrisisFlow.\n\n"
-        "Your available tool is EXACTLY: save_disaster_enrichment. "
-        "No other tool name exists.\n\n"
-        "You MUST call save_disaster_enrichment (no arguments needed — it "
-        "reads all data from session state automatically).\n\n"
-        "This tool writes the weather context, impact analysis, and "
-        "enrichment summaries back to Snowflake for each event.\n\n"
-        "STEP 1: Call save_disaster_enrichment.\n"
-        "STEP 2: Output a text summary of how many events were enriched.\n\n"
-        "IMPORTANT: You MUST call the tool. Without it, no data is saved."
+enrichment_persist_agent = EnrichmentPersistAgent(
+    name="EnrichmentPersistAgent",
+    description=(
+        "Writes weather, impact, and aid analysis from session state to "
+        "Snowflake and commits hub stock when configured."
     ),
-    tools=[save_disaster_enrichment],
-    output_key="enrichment_results",
 )
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -268,17 +270,16 @@ briefing_agent = LlmAgent(
     model=MODEL,
     instruction=(
         "You are an intelligence briefing writer for CrisisFlow.\n\n"
-        "Using ALL the analysis from this session:\n"
-        "- Event data: {event_data}\n"
-        "- Weather analysis: {weather_analysis}\n"
-        "- Impact analysis: {impact_analysis}\n"
-        "- Aid context: {aid_context}\n"
-        "- Enrichment results: {enrichment_results}\n\n"
+        "Using ALL the analysis from this session. Read these keys from "
+        "session state: event_data, weather_analysis, impact_analysis, "
+        "aid_context, and enrichment_results (if available).\n\n"
         "Generate a DETAILED intelligence briefing (at least 600 characters) "
         "in this format:\n\n"
         "CRISISFLOW DISASTER INTELLIGENCE BRIEFING\n"
         "==========================================\n"
-        "Event Type: {event_type}\n"
+        "Event Type: [insert the exact event_type from session state or "
+        "event_data, e.g. wildfire, earthquake — never guess or default to "
+        "earthquake]\n"
         "Generated: [current date/time]\n\n"
         "PRIORITY EVENTS:\n"
         "[For each event, ordered by severity:]\n"
@@ -297,12 +298,14 @@ briefing_agent = LlmAgent(
         "[Specific actionable recommendations with named depots and ETAs]\n\n"
         "WEATHER OUTLOOK:\n"
         "[How weather will affect the situation over the next 7 days]\n\n"
-        "After generating the briefing text, call send_a2a_briefing with "
-        "the full briefing text.\n\n"
-        "Then output the FULL briefing text as your response (at least 600 "
+        "After generating the briefing text, call persist_intelligence_briefing "
+        "with the FULL briefing text so it is saved to Snowflake for the "
+        "CrisisFlow dashboard (Enrichment summary panel).\n\n"
+        "Then call send_a2a_briefing with the same full briefing text.\n\n"
+        "Finally output the FULL briefing text as your response (at least 600 "
         "characters long). Do NOT output just a status summary."
     ),
-    tools=[send_a2a_briefing],
+    tools=[persist_intelligence_briefing, send_a2a_briefing],
     output_key="final_briefing",
 )
 
@@ -323,7 +326,7 @@ root_agent = SequentialAgent(
         data_prep_agent,
         parallel_analysis,
         risk_assessment_loop,
-        enrichment_agent,
+        enrichment_persist_agent,
         briefing_agent,
     ],
 )

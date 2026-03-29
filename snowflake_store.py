@@ -59,8 +59,7 @@ def _get_conn() -> snowflake.connector.SnowflakeConnection:
 
 def ensure_ai_columns() -> None:
     """
-    Add agent_reasoning (VARIANT), citizen_alert (TEXT), and
-    operational_summary (TEXT) to all event tables if they don't exist.
+    Add AI enrichment columns to all event tables if they don't exist.
     Safe to call on every startup.
     """
     new_cols = [
@@ -68,6 +67,8 @@ def ensure_ai_columns() -> None:
         ("CITIZEN_ALERT",      "TEXT"),
         ("OPERATIONAL_SUMMARY","TEXT"),
         ("ARCS",               "VARIANT"),
+        ("ENRICHMENT_STATUS",  "TEXT"),
+        ("ENRICHMENT_SUMMARY", "TEXT"),
     ]
     try:
         conn = _get_conn()
@@ -236,6 +237,109 @@ def store_event(ev: dict[str, Any]) -> bool:
         return False
 
 
+# ── AI enrichment update ───────────────────────────────────────────────────
+
+_ENRICHMENT_UPDATE = """
+UPDATE {table} SET
+    action_summary      = %s,
+    allocation          = PARSE_JSON(%s),
+    agent_reasoning     = PARSE_JSON(%s),
+    operational_summary = %s,
+    affected_population = CASE WHEN %s > 0 THEN %s ELSE affected_population END,
+    enrichment_status   = 'complete'
+WHERE LOWER(TRIM(TO_VARCHAR(id))) = LOWER(TRIM(TO_VARCHAR(%s)))
+"""
+
+
+_enrichment_cols_ensured = False
+
+
+def store_disaster_enrichment(event_id: str, event_type: str, intel: dict) -> bool:
+    """Update an existing event row with AI-generated enrichment data.
+
+    Writes action_summary, allocation (Sphere needs + depot context),
+    agent_reasoning (weather + impact), operational_summary, and sets
+    enrichment_status = 'complete'.  Only updates -- never inserts.
+    """
+    global _enrichment_cols_ensured
+    et = (event_type or "").strip().lower()
+    table = TYPE_TO_TABLE.get(et)
+    if not table:
+        log.debug("store_disaster_enrichment: no table for '%s'", et)
+        return False
+
+    # Ensure ENRICHMENT_STATUS column exists (only runs once per process)
+    if not _enrichment_cols_ensured:
+        ensure_ai_columns()
+        _enrichment_cols_ensured = True
+
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        pop = int(intel.get("affected_population") or 0)
+        cur.execute(
+            _ENRICHMENT_UPDATE.format(table=table),
+            (
+                intel.get("action_summary", ""),
+                json.dumps(intel.get("allocation", {})),
+                json.dumps(intel.get("agent_reasoning", {})),
+                intel.get("operational_summary", ""),
+                pop, pop,
+                event_id,
+            ),
+        )
+        conn.commit()
+        updated = cur.rowcount
+        log.info(
+            "store_disaster_enrichment: %s/%s rowcount=%d",
+            et, event_id[:8], updated,
+        )
+        return updated > 0
+    except Exception as exc:
+        log.error("store_disaster_enrichment(%s) failed: %s", event_id[:8], exc)
+        return False
+
+
+_BRIEFING_UPDATE = """
+UPDATE {table} SET enrichment_summary = %s
+WHERE LOWER(TRIM(TO_VARCHAR(id))) = LOWER(TRIM(TO_VARCHAR(%s)))
+"""
+
+
+def store_enrichment_briefing(
+    event_type: str, event_ids: list[str], briefing_text: str
+) -> int:
+    """Set ENRICHMENT_SUMMARY to the full intelligence briefing for each event row."""
+    et = (event_type or "").strip().lower()
+    table = TYPE_TO_TABLE.get(et)
+    if not table or not event_ids:
+        return 0
+    ensure_ai_columns()
+    updated = 0
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        sql = _BRIEFING_UPDATE.format(table=table)
+        for raw_id in event_ids:
+            eid = (raw_id or "").strip()
+            if not eid:
+                continue
+            cur.execute(sql, (briefing_text, eid))
+            rc = getattr(cur, "rowcount", None)
+            if rc is not None and rc > 0:
+                updated += int(rc)
+        conn.commit()
+        log.info(
+            "store_enrichment_briefing: %s rows updated for %d id(s)",
+            updated,
+            len(event_ids),
+        )
+        return updated
+    except Exception as exc:
+        log.error("store_enrichment_briefing failed: %s", exc)
+        return 0
+
+
 # ── Query helpers ──────────────────────────────────────────────────────────
 
 def get_table(event_type: str, limit: int = 50) -> list[dict]:
@@ -328,6 +432,7 @@ def store_convoys(event_id: str, event_type: str,
     """
     if not convoys:
         return 0
+    event_type = (event_type or "").strip().lower()
     stored = 0
     try:
         conn = _get_conn()

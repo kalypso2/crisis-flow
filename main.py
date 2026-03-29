@@ -35,6 +35,7 @@ from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 
 from schema import CrisisEvent
+from need_calculator import scrub_event_allocation_need_notes
 from adapters import (
     USGSAdapter, NOAAAdapter, GDACSAdapter, EONETAdapter,
     ACLEDAdapter, TwitterAdapter,
@@ -197,6 +198,8 @@ def process_event(event: CrisisEvent) -> Optional[dict]:
         result["arc_source"]  = [0, 0]
         result["arc_dest"]    = [event.lat, event.lon]
         result["arcs"]        = []
+
+    result = scrub_event_allocation_need_notes(result)
 
     log.info(
         "PROCESSED [%s] %s sev=%d flag=%s eta=%s",
@@ -466,10 +469,14 @@ def get_events():
             for r in rows:
                 r["type"] = event_type
             all_events.extend(rows)
-        return jsonify(_dedup_events(all_events))
+        return jsonify([
+            scrub_event_allocation_need_notes(e) for e in _dedup_events(all_events)
+        ])
     except Exception:
         with _lock:
-            return jsonify(_dedup_events(list(processed_events)))
+            return jsonify([
+                scrub_event_allocation_need_notes(e) for e in _dedup_events(list(processed_events))
+            ])
 
 
 @app.route("/quarantine")
@@ -483,11 +490,13 @@ def get_inventory():
     """Current UNHRD depot inventory levels across all hubs."""
     import depot_inventory as _inv
     data = _inv.get_inventory()
+    baselines = _inv.get_all_baselines()
     result = []
     for hub_name, stock in data.items():
         result.append({
             "hub_name":    hub_name,
             "stock":       stock,
+            "baseline":    baselines.get(hub_name, {}),
             "stock_level": _inv.stock_level(hub_name),
         })
     return jsonify(result)

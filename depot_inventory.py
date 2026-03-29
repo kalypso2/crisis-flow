@@ -26,45 +26,45 @@ log = logging.getLogger(__name__)
 # ── Baseline UNHRD inventory (real pre-positioning data) ──────────────────
 _BASELINE: dict[str, dict[str, int]] = {
     "Brindisi UNHRD": {
-        "shelter_kits":  3_000,
-        "food_rations":  180_000,
-        "medical_kits":  400,
-        "water_kits":    3200,
+        "shelter_kits":  6_000,
+        "food_rations":  360_000,
+        "medical_kits":  133,
+        "water_kits":    6400,
         "vehicles":      30,
     },
     "Dubai UNHRD": {
-        "shelter_kits":  5_000,
-        "food_rations":  300_000,
-        "medical_kits":  600,
-        "water_kits":    5600,
+        "shelter_kits":  10_000,
+        "food_rations":  600_000,
+        "medical_kits":  200,
+        "water_kits":    11200,
         "vehicles":      50,
     },
     "Accra UNHRD": {
-        "shelter_kits":  2_000,
-        "food_rations":  120_000,
-        "medical_kits":  250,
-        "water_kits":    2400,
+        "shelter_kits":  4_000,
+        "food_rations":  240_000,
+        "medical_kits":  83,
+        "water_kits":    4800,
         "vehicles":      20,
     },
     "Kuala Lumpur UNHRD": {
-        "shelter_kits":  4_000,
-        "food_rations":  240_000,
-        "medical_kits":  500,
-        "water_kits":    4480,
+        "shelter_kits":  8_000,
+        "food_rations":  480_000,
+        "medical_kits":  167,
+        "water_kits":    8960,
         "vehicles":      40,
     },
     "Panama City UNHRD": {
-        "shelter_kits":  2_500,
-        "food_rations":  150_000,
-        "medical_kits":  300,
-        "water_kits":    2880,
+        "shelter_kits":  5_000,
+        "food_rations":  300_000,
+        "medical_kits":  100,
+        "water_kits":    5760,
         "vehicles":      25,
     },
     "Las Palmas UNHRD": {
-        "shelter_kits":  1_500,
-        "food_rations":  90_000,
-        "medical_kits":  200,
-        "water_kits":    1920,
+        "shelter_kits":  3_000,
+        "food_rations":  180_000,
+        "medical_kits":  67,
+        "water_kits":    3840,
         "vehicles":      15,
     },
 }
@@ -76,6 +76,11 @@ _inventory: dict[str, dict[str, int]] = deepcopy(_BASELINE)
 _last_replenish: float = time.time()
 REPLENISH_INTERVAL_S = 7 * 24 * 3600   # full resupply once per week (604,800 s)
 REPLENISH_RATE = 1.0                    # restore 100% of baseline each cycle
+
+
+def get_all_baselines() -> dict[str, dict[str, int]]:
+    """Configured baseline stock per hub (for UI comparison)."""
+    return deepcopy(_BASELINE)
 
 
 def get_inventory() -> dict[str, dict[str, int]]:

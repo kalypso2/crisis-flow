@@ -38,6 +38,47 @@ DISPLACEMENT_RATE: dict[str, float] = {
 }
 
 
+def scrub_aid_need_notes(notes: list | None) -> list[str]:
+    """
+    Drop legacy / internal notes about imputed population from user-facing need.notes.
+    Stale rows (e.g. Snowflake) may still contain these strings.
+    """
+    if not notes:
+        return []
+    out: list[str] = []
+    for n in notes:
+        if not isinstance(n, str):
+            continue
+        low = n.lower()
+        if "population unknown" in low and "severity-based estimate" in low:
+            continue
+        out.append(n)
+    return out
+
+
+def scrub_event_allocation_need_notes(ev: dict) -> dict:
+    """Return ev with allocation.need.notes scrubbed (shallow copy only if notes change)."""
+    alloc = ev.get("allocation")
+    if not isinstance(alloc, dict):
+        return ev
+    need = alloc.get("need")
+    if not isinstance(need, dict):
+        return ev
+    raw = need.get("notes")
+    if not isinstance(raw, list) or not raw:
+        return ev
+    cleaned = scrub_aid_need_notes(raw)
+    if cleaned == raw:
+        return ev
+    return {
+        **ev,
+        "allocation": {
+            **alloc,
+            "need": {**need, "notes": cleaned},
+        },
+    }
+
+
 @dataclass
 class AidNeed:
     """Quantities of each aid type required to respond to one event."""
@@ -59,7 +100,7 @@ class AidNeed:
             "vehicles":      self.vehicles,
             "window_days":   self.window_days,
             "displaced":     self.displaced,
-            "notes":         self.notes,
+            "notes":         scrub_aid_need_notes(self.notes),
         }
 
 
@@ -78,11 +119,9 @@ def calculate(
     if window == 0:
         return AidNeed(notes=["below deployment threshold"])
 
-    # Default population if unknown
+    # Default population if unknown (no user-facing note — same math, quieter UI)
     pop = affected_population if affected_population > 0 else _default_pop(severity)
-    notes = []
-    if affected_population == 0:
-        notes.append(f"population unknown — using severity-based estimate ({pop:,})")
+    notes: list[str] = []
 
     disp_rate = DISPLACEMENT_RATE.get(event_type, 0.20)
     displaced = int(pop * disp_rate)
@@ -127,7 +166,7 @@ def calculate(
         vehicles=vehicles,
         window_days=window,
         displaced=displaced,
-        notes=notes,
+        notes=scrub_aid_need_notes(notes),
     )
 
 

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import math
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from depot_inventory import _BASELINE, ALL_STOCK_TYPES
@@ -31,6 +31,7 @@ from need_calculator import calculate
 
 @dataclass
 class FeedEntry:
+    sequence:      int               # unique 1..N — order of this line in the feed
     hub_name:      str
     hub_org:       str
     hub_lat:       float
@@ -41,12 +42,13 @@ class FeedEntry:
     event_lat:     float
     event_lon:     float
     severity:      int
-    priority_rank: int
+    priority_rank: int               # event's place in severity queue (same for all hubs serving that event)
     supplies:      dict[str, int]    # what this hub committed to this event
     needs_fully_met: bool            # True if all of the event's needs are now satisfied
 
     def to_dict(self) -> dict:
         return {
+            "sequence":       self.sequence,
             "hub_name":       self.hub_name,
             "hub_org":        self.hub_org,
             "hub_lat":        self.hub_lat,
@@ -124,6 +126,7 @@ def simulate_week(events: list[dict[str, Any]]) -> SimulationResult:
     need_map:   dict[str, dict[str, int]] = {}
     feed:       list[dict] = []
     rank = 0
+    feed_seq = 0  # unique index per feed row (multiple hubs → multiple rows per event)
     events_served = 0
     events_unmet  = 0
 
@@ -175,8 +178,10 @@ def simulate_week(events: list[dict[str, Any]]) -> SimulationResult:
                     remaining[item]           = needed - give
 
             if any(v > 0 for v in allocation.values()):
+                feed_seq += 1
                 fully_met = all(v <= 0 for v in remaining.values())
                 feed.append(FeedEntry(
+                    sequence      = feed_seq,
                     hub_name      = hub["name"],
                     hub_org       = hub.get("org", ""),
                     hub_lat       = hub["lat"],

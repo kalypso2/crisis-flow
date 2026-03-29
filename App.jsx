@@ -215,7 +215,7 @@ function _barColor(pct) {
   return "#E24B4A";
 }
 
-function AidPanel({ ev, distResult, onClose }) {
+function AidPanel({ ev, distResult, onClose, onDetailsClick }) {
   if (!ev) return null;
   const alloc     = ev.allocation || {};
   const need      = alloc.need    || {};
@@ -237,14 +237,36 @@ function AidPanel({ ev, distResult, onClose }) {
   return (
     <div style={{ width: 360, borderLeft: "0.5px solid var(--color-border-tertiary)", display: "flex", flexDirection: "column", overflowY: "auto" }}>
       {/* Header */}
-      <div style={{ padding: "16px 20px 12px", borderBottom: "0.5px solid var(--color-border-tertiary)", display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexShrink: 0 }}>
-        <div>
+      <div style={{ padding: "16px 20px 12px", borderBottom: "0.5px solid var(--color-border-tertiary)", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, flexShrink: 0 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 14, fontWeight: 600, color: "#1D9E75", marginBottom: 2 }}>Aid Requirements</div>
-          <div style={{ fontSize: 11, color: "var(--color-text-tertiary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 280 }}>
+          <div style={{ fontSize: 11, color: "var(--color-text-tertiary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {TYPE_EMOJI[ev.type]} {ev.title}
           </div>
         </div>
-        <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "var(--color-text-tertiary)", padding: 0 }}>×</button>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 6, flexShrink: 0 }}>
+          {onDetailsClick && (
+            <button
+              type="button"
+              onClick={() => onDetailsClick(ev)}
+              title="View full event details"
+              style={{
+                fontSize: 10, fontWeight: 600,
+                marginTop: 2,
+                padding: "4px 9px", borderRadius: 4,
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+                lineHeight: 1.4,
+                border: "1px solid var(--color-border-secondary)",
+                background: "var(--color-background-primary)",
+                color: "var(--color-text-secondary)",
+              }}
+            >
+              Details
+            </button>
+          )}
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "var(--color-text-tertiary)", padding: 0 }}>×</button>
+        </div>
       </div>
 
       <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 14 }}>
@@ -336,14 +358,14 @@ function AidPanel({ ev, distResult, onClose }) {
         {evFeed.length > 0 && (
           <div>
             <div style={{ fontSize: 10, letterSpacing: "0.08em", color: "var(--color-text-tertiary)", textTransform: "uppercase", marginBottom: 8 }}>
-              Hub Contributions (priority #{evFeed[0]?.priority_rank})
+              Hub Contributions
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {evFeed.map((entry, i) => (
                 <div key={i} style={{ background: "var(--color-background-secondary)", borderRadius: 8, padding: "10px 12px" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
                     <span style={{ fontSize: 12, fontWeight: 500, color: "var(--color-text-primary)" }}>
-                      ✈️ {entry.hub_name}
+                      {entry.hub_name}
                     </span>
                     {entry.needs_fully_met && i === evFeed.length - 1 && (
                       <span style={{ fontSize: 10, background: "#1D9E7520", color: "#1D9E75", borderRadius: 3, padding: "1px 5px", fontWeight: 600 }}>
@@ -391,35 +413,104 @@ const TRANSPORT_ICON = { air: "✈️", land: "🚛", sea: "🚢" };
 // ── Stock level colour ────────────────────────────────────────────────────
 const STOCK_COLOR = { high: "#1D9E75", medium: "#EF9F27", low: "#D85A30", critical: "#E24B4A", unknown: "#888780" };
 
-// ── Inventory bar — shown in the sidebar footer ───────────────────────────
-function InventoryBar({ inventory }) {
-  if (!inventory || inventory.length === 0) return null;
+const HUB_INVENTORY_ROWS = [
+  { key: "shelter_kits",  label: "Shelter kits",           unit: "kits",         icon: "🏕️" },
+  { key: "food_rations",  label: "Food rations",           unit: "person-days",  icon: "🍱" },
+  { key: "medical_kits",  label: "Medical kits (IEHK)",  unit: "kits",         icon: "🩺" },
+  { key: "water_kits",    label: "Water kits",             unit: "units",        icon: "💧" },
+  { key: "vehicles",      label: "Field vehicles",         unit: "vehicles",     icon: "🚛" },
+];
+
+function shortHubName(fullName) {
+  return (fullName || "").replace(" UNHRD", "").replace(" UNHCR", "").replace(" OCHA", "").replace(" WFP", "");
+}
+
+// ── Hub detail panel (right) — opened from HUB INVENTORY clicks ──────────
+function HubInventoryPanel({ hub, onClose }) {
+  if (!hub) return null;
+  const stock = hub.stock || {};
+  const baseline = hub.baseline || {};
+  const lvlColor = STOCK_COLOR[hub.stock_level] || STOCK_COLOR.unknown;
+  const aggregatePct = {
+    high: 80, medium: 50, low: 20, critical: 5, unknown: 0,
+  }[hub.stock_level] ?? 0;
+
   return (
-    <div style={{ borderTop: "0.5px solid var(--color-border-tertiary)", padding: "10px 14px" }}>
-      <div style={{ fontSize: 10, letterSpacing: "0.08em", color: "var(--color-text-tertiary)", marginBottom: 8 }}>
-        HUB INVENTORY
+    <div style={{
+      width: 300,
+      borderLeft: "0.5px solid var(--color-border-tertiary)",
+      display: "flex",
+      flexDirection: "column",
+      overflowY: "auto",
+      flexShrink: 0,
+    }}>
+      <div style={{
+        padding: "10px 12px 8px",
+        borderBottom: "0.5px solid var(--color-border-tertiary)",
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "flex-start",
+      }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: "var(--color-text-info, #378ADD)", marginBottom: 2 }}>
+            Hub stock
+          </div>
+          <div style={{ fontSize: 12, fontWeight: 500, color: "var(--color-text-primary)", lineHeight: 1.25 }}>
+            {hub.hub_name}
+          </div>
+          <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 9, color: "var(--color-text-tertiary)" }}>Σ</span>
+            <span style={{ fontSize: 10, fontWeight: 700, color: lvlColor, textTransform: "uppercase" }}>{hub.stock_level}</span>
+          </div>
+          <div style={{ height: 3, borderRadius: 2, background: "var(--color-border-secondary)", marginTop: 4, maxWidth: 200 }}>
+            <div style={{ height: 3, borderRadius: 2, background: lvlColor, width: `${aggregatePct}%`, transition: "width 0.5s" }} />
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          style={{ background: "none", border: "none", cursor: "pointer", fontSize: 16, color: "var(--color-text-tertiary)", padding: 0, flexShrink: 0, lineHeight: 1 }}
+        >
+          ×
+        </button>
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        {inventory.map(hub => {
-          const pct = {
-            high: 80, medium: 50, low: 20, critical: 5, unknown: 0,
-          }[hub.stock_level] ?? 0;
-          const color = STOCK_COLOR[hub.stock_level];
+
+      <div style={{ padding: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+        <div style={{ fontSize: 8, letterSpacing: "0.06em", color: "var(--color-text-tertiary)", textTransform: "uppercase" }}>
+          On hand / baseline
+        </div>
+        {HUB_INVENTORY_ROWS.map(({ key, label, unit, icon }) => {
+          const cur = Number(stock[key] ?? 0);
+          const base = Number(baseline[key] ?? 0);
+          const pct = base > 0 ? Math.min(100, Math.round((cur / base) * 100)) : (cur > 0 ? 100 : 0);
+          const bar = pct >= 60 ? "#1D9E75" : pct >= 35 ? "#EF9F27" : pct >= 10 ? "#D85A30" : "#E24B4A";
           return (
-            <div key={hub.hub_name} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
-                  <span style={{ fontSize: 10, color: "var(--color-text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 140 }}>
-                    {hub.hub_name.replace(" UNHRD", "").replace(" UNHCR", "").replace(" OCHA", "").replace(" WFP", "")}
-                  </span>
-                  <span style={{ fontSize: 10, color, fontWeight: 600 }}>
-                    {hub.stock_level}
-                  </span>
-                </div>
-                <div style={{ height: 4, borderRadius: 2, background: "var(--color-border-secondary)" }}>
-                  <div style={{ height: 4, borderRadius: 2, background: color, width: `${pct}%`, transition: "width 0.5s" }} />
+            <div key={key} style={{ background: "var(--color-background-secondary)", borderRadius: 6, padding: "6px 8px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: base > 0 ? 4 : 0 }}>
+                <span style={{ fontSize: 14, lineHeight: 1 }}>{icon}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 10, fontWeight: 500, color: "var(--color-text-primary)", lineHeight: 1.2 }}>{label}</div>
+                  <div style={{ fontSize: 9, color: "var(--color-text-tertiary)", marginTop: 1 }}>
+                    <span style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>{cur.toLocaleString()}</span>
+                    {base > 0 && (
+                      <>
+                        {" / "}
+                        <span>{base.toLocaleString()}</span>
+                        {" "}
+                        <span style={{ fontSize: 8 }}>{unit}</span>
+                        {" · "}
+                        <span style={{ fontWeight: 600, color: bar }}>{pct}%</span>
+                      </>
+                    )}
+                    {base <= 0 && <span style={{ fontSize: 8 }}> {unit}</span>}
+                  </div>
                 </div>
               </div>
+              {base > 0 && (
+                <div style={{ height: 2, borderRadius: 1, background: "var(--color-border-secondary)" }}>
+                  <div style={{ height: 2, borderRadius: 1, background: bar, width: `${pct}%`, transition: "width 0.35s" }} />
+                </div>
+              )}
             </div>
           );
         })}
@@ -428,8 +519,69 @@ function InventoryBar({ inventory }) {
   );
 }
 
+const STOCK_LEVEL_SHORT = { high: "hi", medium: "med", low: "lo", critical: "!", unknown: "?" };
+
+// ── Inventory bar — compact footer strip ──────────────────────────────────
+function InventoryBar({ inventory, selectedHubName, onHubClick }) {
+  if (!inventory || inventory.length === 0) return null;
+  return (
+    <div style={{ borderTop: "0.5px solid var(--color-border-tertiary)", padding: "5px 8px 6px", flexShrink: 0 }}>
+      <div style={{ fontSize: 8, letterSpacing: "0.06em", color: "var(--color-text-tertiary)", marginBottom: 4, textTransform: "uppercase" }}>
+        Hub stock
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        {inventory.map(hub => {
+          const pct = {
+            high: 80, medium: 50, low: 20, critical: 5, unknown: 0,
+          }[hub.stock_level] ?? 0;
+          const color = STOCK_COLOR[hub.stock_level];
+          const active = selectedHubName && hub.hub_name === selectedHubName;
+          const shortLv = STOCK_LEVEL_SHORT[hub.stock_level] ?? hub.stock_level?.slice(0, 3) ?? "?";
+          return (
+            <button
+              key={hub.hub_name}
+              type="button"
+              onClick={() => onHubClick?.(hub)}
+              title={`Open ${hub.hub_name} inventory`}
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 1,
+                width: "100%",
+                padding: "2px 4px",
+                margin: 0,
+                border: active ? `1px solid ${color}66` : "1px solid transparent",
+                borderRadius: 4,
+                background: active ? `${color}10` : "transparent",
+                cursor: "pointer",
+                textAlign: "left",
+                fontFamily: "inherit",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 4, minHeight: 14 }}>
+                <span style={{ fontSize: 9, color: "var(--color-text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+                  {shortHubName(hub.hub_name)}
+                </span>
+                <span style={{ fontSize: 8, color, fontWeight: 700, flexShrink: 0, textTransform: "uppercase" }}>
+                  {shortLv}
+                </span>
+              </div>
+              <div style={{ height: 2, borderRadius: 1, background: "var(--color-border-secondary)" }}>
+                <div style={{ height: 2, borderRadius: 1, background: color, width: `${pct}%`, transition: "width 0.5s" }} />
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Detail panel: omit radius for feeds where it is a fixed placeholder, not a derived impact zone.
+const DETAIL_HIDE_RADIUS_SOURCES = new Set(["eonet", "acled", "gdacs", "noaa", "twitter"]);
+
 // ── Detail panel ──────────────────────────────────────────────────────────
-function DetailPanel({ ev, binEvents, onSelectBinEvent, onClose }) {
+function DetailPanel({ ev, binEvents, onSelectBinEvent, onClose, distResult, onAidClick }) {
   if (!ev) return (
     <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--color-text-tertiary)", fontSize: 13 }}>
       Select an event to see details
@@ -437,6 +589,11 @@ function DetailPanel({ ev, binEvents, onSelectBinEvent, onClose }) {
   );
 
   const alloc = ev.allocation || {};
+  const { style: detailAidBtnStyle, avgPct: detailAidAvgPct } = getAidButtonStyle(ev, distResult);
+  const detailAidTitle = detailAidAvgPct == null
+    ? "View aid requirements (run week simulation for fill status)"
+    : `View aid requirements — average supply fill: ${detailAidAvgPct}%`;
+
   return (
     <div style={{ flex: 1, overflowY: "auto" }}>
       {/* Bin picker — shown only when a hex with multiple events is clicked */}
@@ -475,8 +632,25 @@ function DetailPanel({ ev, binEvents, onSelectBinEvent, onClose }) {
           <div style={{ fontSize: 18, fontWeight: 500, color: "var(--color-text-primary)", marginBottom: 4 }}>
             {TYPE_EMOJI[ev.type]} {ev.title}
           </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <SevBadge sev={ev.severity} />
+            {onAidClick && (
+              <button
+                type="button"
+                onClick={() => onAidClick(ev)}
+                title={detailAidTitle}
+                style={{
+                  fontSize: 10, fontWeight: 600,
+                  padding: "2px 7px", borderRadius: 4,
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                  lineHeight: 1.4,
+                  ...detailAidBtnStyle,
+                }}
+              >
+                Aid
+              </button>
+            )}
             <span style={{ fontSize: 11, color: "var(--color-text-tertiary)", textTransform: "uppercase" }}>{ev.type}</span>
             <span style={{ fontSize: 11, color: "var(--color-text-tertiary)" }}>via {ev.source?.toUpperCase()}</span>
             <FlagBadge flag={ev.consensus_flag} />
@@ -493,8 +667,9 @@ function DetailPanel({ ev, binEvents, onSelectBinEvent, onClose }) {
 
       <Section title="Location">
         <Row label="Lat / Lon">{ev.lat?.toFixed(4)}, {ev.lon?.toFixed(4)}</Row>
-        <Row label="Radius">{ev.radius_km} km</Row>
-        <Row label="Affected pop.">{ev.affected_population?.toLocaleString() || "unknown"}</Row>
+        {!DETAIL_HIDE_RADIUS_SOURCES.has(String(ev.source || "").toLowerCase()) && (
+          <Row label="Radius">{ev.radius_km} km</Row>
+        )}
         {ev.location_name && <Row label="Area">{ev.location_name}</Row>}
       </Section>
 
@@ -502,7 +677,6 @@ function DetailPanel({ ev, binEvents, onSelectBinEvent, onClose }) {
         <Section title="Aid deployment">
           <Row label="Lead hub">{alloc.depot_name}</Row>
           {alloc.depot_org && <Row label="Organisation">{alloc.depot_org}</Row>}
-          <Row label="Transport">{TRANSPORT_ICON[alloc.transport_mode] || "✈️"} {alloc.transport_mode || "air"}</Row>
           <Row label="Lead ETA">{alloc.eta_minutes} min</Row>
           <Row label="Resources">
             <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 2 }}>
@@ -511,23 +685,6 @@ function DetailPanel({ ev, binEvents, onSelectBinEvent, onClose }) {
               ))}
             </div>
           </Row>
-        </Section>
-      )}
-
-      {alloc.need && alloc.need.displaced > 0 && (
-        <Section title="Aid need (Sphere standards)">
-          <Row label="Est. displaced">{(alloc.need.displaced || 0).toLocaleString()}</Row>
-          <Row label="Planning window">{alloc.need.window_days} days</Row>
-          <Row label="Shelter kits">{(alloc.need.shelter_kits || 0).toLocaleString()}</Row>
-          <Row label="Food rations">{(alloc.need.food_rations || 0).toLocaleString()}</Row>
-          <Row label="Medical kits">{(alloc.need.medical_kits || 0).toLocaleString()}</Row>
-          <Row label="Water kits">{(alloc.need.water_kits || 0).toLocaleString()}</Row>
-          <Row label="Vehicles">{alloc.need.vehicles || 0}</Row>
-          {(alloc.need.notes || []).length > 0 && (
-            <div style={{ marginTop: 6, fontSize: 11, color: "var(--color-text-tertiary)", fontStyle: "italic" }}>
-              {alloc.need.notes.join(" · ")}
-            </div>
-          )}
         </Section>
       )}
 
@@ -598,31 +755,6 @@ function Row({ label, children }) {
   );
 }
 
-// ── Agent health panel ────────────────────────────────────────────────────
-function HealthPanel({ health }) {
-  if (!health) return null;
-  return (
-    <div style={{ borderTop: "0.5px solid var(--color-border-tertiary)", padding: "10px 14px" }}>
-      <div style={{ fontSize: 10, letterSpacing: "0.08em", color: "var(--color-text-tertiary)", marginBottom: 8 }}>AGENT STATUS</div>
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        {Object.entries(health.agents || {}).map(([name, info]) => (
-          <div key={name} style={{
-            fontSize: 10, borderRadius: 4, padding: "2px 8px",
-            background: info.status === "OK" ? "var(--color-background-success)" : "var(--color-background-danger)",
-            color: info.status === "OK" ? "var(--color-text-success)" : "var(--color-text-danger)",
-            border: `0.5px solid ${info.status === "OK" ? "var(--color-border-success)" : "var(--color-border-danger)"}`,
-          }}>
-            {name} {info.status === "DEGRADED" ? `⚠ ${info.recent_failures}f` : "✓"}
-          </div>
-        ))}
-      </div>
-      <div style={{ fontSize: 10, color: "var(--color-text-tertiary)", marginTop: 6 }}>
-        Queue: {health.queue_depth} · Processed: {health.processed_total}
-      </div>
-    </div>
-  );
-}
-
 // ── 3D globe ──────────────────────────────────────────────────────────────
 function dominantType(hexBin) {
   const counts = {};
@@ -633,47 +765,73 @@ function dominantType(hexBin) {
   return sorted.length > 0 ? sorted[0][0] : "unknown";
 }
 
-function GlobePanel({ events, onSelect }) {
+/** One great-circle arc per distribution feed row; staggered reveal in GlobePanel. */
+const SIM_ARC_STAGGER_MS = 420;
+
+function feedRowToSimulationArc(row) {
+  const supplies = row?.supplies || {};
+  const hasGive = Object.values(supplies).some(v => Number(v) > 0);
+  if (!hasGive) return null;
+  const hLat = row.hub_lat;
+  const hLon = row.hub_lon;
+  const eLat = row.event_lat;
+  const eLon = row.event_lon;
+  if (![hLat, hLon, eLat, eLon].every(n => Number.isFinite(n))) return null;
+  return {
+    startLat: hLat,
+    startLng: hLon,
+    endLat: eLat,
+    endLng: eLon,
+    color: TYPE_COLOR[row.event_type] || "#888888",
+    sequence: row.sequence,
+  };
+}
+
+function GlobePanel({ events, distResult, eventTypeFilter = "all", onSelect }) {
   const globeRef = useRef(null);
 
   const validEvents = useMemo(() =>
     events.filter(ev => Number.isFinite(ev.lat) && Number.isFinite(ev.lon)),
   [events]);
 
-  const arcsData = useMemo(() => {
-    const result = [];
-    for (const ev of events) {
-      const dest = ev.arc_dest;
-      if (!Array.isArray(dest) || dest.length < 2) continue;
-      const color = TYPE_COLOR[ev.type] || "#888888";
-
-      // Multi-hub: one arc per convoy leg
-      if (Array.isArray(ev.arcs) && ev.arcs.length > 0) {
-        for (const arc of ev.arcs) {
-          if (arc.src_lat != null && arc.src_lon != null) {
-            result.push({
-              startLat: arc.src_lat,
-              startLng: arc.src_lon,
-              endLat:   dest[0],
-              endLng:   dest[1],
-              color,
-              hubName:  arc.hub_name || "",
-              transport: arc.transport || "air",
-            });
-          }
-        }
-      } else if (Array.isArray(ev.arc_source) && ev.arc_source.length >= 2) {
-        result.push({
-          startLat: ev.arc_source[0],
-          startLng: ev.arc_source[1],
-          endLat:   dest[0],
-          endLng:   dest[1],
-          color,
-        });
-      }
+  const allSimulationArcs = useMemo(() => {
+    const feed = distResult?.feed;
+    if (!Array.isArray(feed) || feed.length === 0) return [];
+    let rows = [...feed].sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
+    if (eventTypeFilter !== "all") {
+      rows = rows.filter(r => r.event_type === eventTypeFilter);
     }
-    return result;
-  }, [events]);
+    const out = [];
+    for (const row of rows) {
+      const arc = feedRowToSimulationArc(row);
+      if (arc) out.push(arc);
+    }
+    return out;
+  }, [distResult, eventTypeFilter]);
+
+  const [visibleArcCount, setVisibleArcCount] = useState(0);
+
+  useEffect(() => {
+    if (allSimulationArcs.length === 0) {
+      setVisibleArcCount(0);
+      return undefined;
+    }
+    setVisibleArcCount(1);
+    const max = allSimulationArcs.length;
+    if (max <= 1) return undefined;
+    let n = 1;
+    const id = setInterval(() => {
+      n += 1;
+      setVisibleArcCount(n);
+      if (n >= max) clearInterval(id);
+    }, SIM_ARC_STAGGER_MS);
+    return () => clearInterval(id);
+  }, [allSimulationArcs]);
+
+  const arcsData = useMemo(
+    () => allSimulationArcs.slice(0, visibleArcCount),
+    [allSimulationArcs, visibleArcCount],
+  );
 
   useEffect(() => {
     if (!globeRef.current) return;
@@ -699,7 +857,7 @@ function GlobePanel({ events, onSelect }) {
       <div style={{ position: "absolute", inset: 0 }}>
         <Globe
           ref={globeRef}
-          width={window.innerWidth - 660}
+          width={window.innerWidth - 760}
           height={window.innerHeight - 220}
           backgroundColor="rgba(0,0,0,0)"
           globeImageUrl="//unpkg.com/three-globe/example/img/earth-blue-marble.jpg"
@@ -738,7 +896,10 @@ function GlobePanel({ events, onSelect }) {
       )}
 
       <div style={{ position: "absolute", top: 16, right: 20, fontSize: 11, color: "var(--color-text-tertiary)" }}>
-        Events: {validEvents.length} · Arcs: {arcsData.length}
+        Events: {validEvents.length}
+        {allSimulationArcs.length > 0
+          ? ` · Simulation arcs: ${arcsData.length}/${allSimulationArcs.length}`
+          : " · Run distribution for arcs"}
       </div>
 
       <div style={{ position: "absolute", bottom: 16, left: 20, display: "flex", flexWrap: "wrap", gap: 10, maxWidth: "65%" }}>
@@ -838,10 +999,11 @@ const TYPE_LABEL = {
 };
 const SEV_BG = { 5: "#E24B4A22", 4: "#D85A3022", 3: "#EF9F2722", 2: "#1D9E7522", 1: "#37ADD422" };
 
-function DistributionFeed({ distResult, visible, onToggle }) {
+function DistributionFeed({ distResult, visible, onToggle, events, onFeedRowClick }) {
   const feed = distResult?.feed || [];
   const served = distResult?.events_served ?? 0;
   const unmet  = distResult?.events_unmet  ?? 0;
+  const rowClickable = typeof onFeedRowClick === "function" && Array.isArray(events);
 
   return (
     <div style={{
@@ -886,14 +1048,37 @@ function DistributionFeed({ distResult, visible, onToggle }) {
               {distResult ? "No allocations — all hubs empty or no eligible events." : "Move the week slider to run distribution."}
             </div>
           ) : (
-            feed.map((entry, i) => (
-              <div key={i} style={{
+            feed.map((entry, i) => {
+              const seq = entry.sequence ?? i + 1;
+              const openAid = () => {
+                if (!rowClickable) return;
+                const id = entry.event_id;
+                const ev = events.find(e => e.id === id || String(e.id) === String(id));
+                if (ev) onFeedRowClick(ev);
+              };
+              return (
+              <div
+                key={seq}
+                role={rowClickable ? "button" : undefined}
+                tabIndex={rowClickable ? 0 : undefined}
+                onClick={rowClickable ? openAid : undefined}
+                onKeyDown={rowClickable ? (e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    openAid();
+                  }
+                } : undefined}
+                title={rowClickable ? "Open aid requirements for this event" : undefined}
+                style={{
                 display: "flex", alignItems: "flex-start", gap: 10,
                 padding: "6px 18px",
                 background: i % 2 === 0 ? "transparent" : "var(--color-background-secondary)",
                 borderLeft: `3px solid ${TYPE_COLOR[entry.event_type] || "#888"}`,
-              }}>
-                {/* Priority rank badge */}
+                cursor: rowClickable ? "pointer" : undefined,
+                }}
+                onMouseDown={rowClickable ? (e) => { if (e.detail > 1) e.preventDefault(); } : undefined}
+              >
+                {/* Unique allocation order (#1, #2, …); color = event severity */}
                 <div style={{
                   minWidth: 22, height: 22, borderRadius: "50%",
                   background: SEV_BG[entry.severity] || "#88888822",
@@ -902,7 +1087,7 @@ function DistributionFeed({ distResult, visible, onToggle }) {
                   color: SEV_COLOR[entry.severity] || "#888",
                   flexShrink: 0,
                 }}>
-                  #{entry.priority_rank}
+                  #{seq}
                 </div>
                 {/* Hub → event */}
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -925,9 +1110,13 @@ function DistributionFeed({ distResult, visible, onToggle }) {
                       </span>
                     ))}
                   </div>
+                  <div style={{ fontSize: 8, color: "var(--color-text-tertiary)", marginTop: 2 }}>
+                    Severity queue #{entry.priority_rank}
+                  </div>
                 </div>
               </div>
-            ))
+              );
+            })
           )}
         </div>
       )}
@@ -1047,6 +1236,20 @@ function tryParseJson(val, fallback) {
   return fallback;
 }
 
+/** Strip legacy need.notes lines about imputed population (stale API / DB). */
+function scrubAllocationNeedNotes(allocation) {
+  if (!allocation || typeof allocation !== "object") return allocation;
+  const need = allocation.need;
+  if (!need || typeof need !== "object" || !Array.isArray(need.notes)) return allocation;
+  const filtered = need.notes.filter(n => {
+    if (typeof n !== "string") return true;
+    const low = n.toLowerCase();
+    return !(low.includes("population unknown") && low.includes("severity-based estimate"));
+  });
+  if (filtered.length === need.notes.length) return allocation;
+  return { ...allocation, need: { ...need, notes: filtered } };
+}
+
 function normalizeRow(row, fallbackType) {
   const lower = {};
   for (const [k, v] of Object.entries(row)) {
@@ -1070,7 +1273,7 @@ function normalizeRow(row, fallbackType) {
     action_summary: lower.action_summary || "",
     consensus_flag: lower.consensus_flag || "",
     domain_tags: tryParseJson(lower.domain_tags, []),
-    allocation: tryParseJson(lower.allocation, {}),
+    allocation: scrubAllocationNeedNotes(tryParseJson(lower.allocation, {})),
     globe_color: lower.globe_color || "#888780",
     arc_source: tryParseJson(lower.arc_source, [0, 0]),
     arc_dest: tryParseJson(lower.arc_dest, [lat, lon]),
@@ -1086,11 +1289,11 @@ export default function App() {
   const [events, setEvents] = useState([]);
   const [selected, setSelected] = useState(null);
   const [selectedBin, setSelectedBin] = useState(null);
-  const [health, setHealth] = useState(null);
   const [connected, setConnected] = useState(false);
   const [filter, setFilter] = useState("all");
   const [inventory, setInventory] = useState([]);
   const [aidEvent, setAidEvent] = useState(null);
+  const [hubPanelHub, setHubPanelHub] = useState(null); // hub detail panel from HUB INVENTORY
   const [distResult, setDistResult] = useState(null);   // simulation result for current week
   const [feedOpen, setFeedOpen] = useState(true);        // distribution feed expanded?
   const [distributing, setDistributing] = useState(false);
@@ -1101,7 +1304,6 @@ export default function App() {
   const [selectedWeekIdx, setSelectedWeekIdx] = useState(0);
 
   const base = useMemo(() => apiOrigin(), []);
-  const healthUrl = `${base}/health`;
 
   // Fetch all events once; filtering is done client-side
   useEffect(() => {
@@ -1163,15 +1365,6 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [weekFilteredEvents]);
 
-
-  // Health polling
-  useEffect(() => {
-    const poll = () =>
-      fetch(healthUrl).then((r) => r.json()).then(setHealth).catch(() => {});
-    poll();
-    const id = setInterval(poll, 10000);
-    return () => clearInterval(id);
-  }, [healthUrl]);
 
   // Inventory polling — every 60s
   useEffect(() => {
@@ -1239,8 +1432,9 @@ export default function App() {
       <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
         {/* Event list */}
         <div style={{
-          width: 320, borderRight: "0.5px solid var(--color-border-tertiary)",
+          width: 400, borderRight: "0.5px solid var(--color-border-tertiary)",
           display: "flex", flexDirection: "column", overflow: "hidden",
+          minWidth: 0,
         }}>
           <div style={{ flex: 1, overflowY: "auto" }}>
             {displayedEvents.length === 0 && (
@@ -1253,37 +1447,54 @@ export default function App() {
                 key={ev.id}
                 ev={ev}
                 selected={selected?.id === ev.id}
-                onClick={() => { setSelectedBin(null); setSelected(ev); setAidEvent(null); }}
-                onAidClick={ev => { setSelected(null); setSelectedBin(null); setAidEvent(ev); }}
+                onClick={() => { setSelectedBin(null); setSelected(ev); setAidEvent(null); setHubPanelHub(null); }}
+                onAidClick={ev => { setSelected(null); setSelectedBin(null); setAidEvent(ev); setHubPanelHub(null); }}
                 distResult={distResult}
               />
             ))}
           </div>
-          <HealthPanel health={health} />
-          <InventoryBar inventory={inventory} />
+          <InventoryBar
+            inventory={inventory}
+            selectedHubName={hubPanelHub?.hub_name}
+            onHubClick={h => {
+              setSelected(null);
+              setSelectedBin(null);
+              setAidEvent(null);
+              setHubPanelHub(h);
+            }}
+          />
         </div>
 
         {/* Globe + detail */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
           <GlobePanel
             events={displayedEvents}
+            distResult={distResult}
+            eventTypeFilter={filter}
             onSelect={points => {
               // hex click passes an array; list click passes a single event
               if (Array.isArray(points)) {
                 setSelectedBin(points.length > 1 ? points : null);
                 setSelected(points[0] ?? null);
                 setAidEvent(null);
+                setHubPanelHub(null);
               } else {
                 setSelectedBin(null);
                 setSelected(points);
                 setAidEvent(null);
+                setHubPanelHub(null);
               }
             }}
           />
         </div>
 
-        {/* Detail panel */}
-        {selected && (
+        {/* Exactly one right panel: hub inventory, detail, or aid */}
+        {hubPanelHub ? (
+          <HubInventoryPanel
+            hub={hubPanelHub}
+            onClose={() => setHubPanelHub(null)}
+          />
+        ) : selected ? (
           <div style={{
             width: 340, borderLeft: "0.5px solid var(--color-border-tertiary)",
             overflowY: "auto", display: "flex", flexDirection: "column",
@@ -1291,20 +1502,30 @@ export default function App() {
             <DetailPanel
               ev={selected}
               binEvents={selectedBin}
-              onSelectBinEvent={ev => setSelected(ev)}
+              onSelectBinEvent={ev => { setSelected(ev); setHubPanelHub(null); }}
               onClose={() => { setSelected(null); setSelectedBin(null); }}
+              distResult={distResult}
+              onAidClick={ev => {
+                setSelected(null);
+                setSelectedBin(null);
+                setHubPanelHub(null);
+                setAidEvent(ev);
+              }}
             />
           </div>
-        )}
-
-        {/* Aid panel */}
-        {aidEvent && (
+        ) : aidEvent ? (
           <AidPanel
             ev={aidEvent}
             distResult={distResult}
             onClose={() => setAidEvent(null)}
+            onDetailsClick={ev => {
+              setAidEvent(null);
+              setHubPanelHub(null);
+              setSelectedBin(null);
+              setSelected(ev);
+            }}
           />
-        )}
+        ) : null}
       </div>
 
       {/* Distribution feed */}
@@ -1312,6 +1533,13 @@ export default function App() {
         distResult={distResult}
         visible={feedOpen}
         onToggle={() => setFeedOpen(v => !v)}
+        events={events}
+        onFeedRowClick={ev => {
+          setSelected(null);
+          setSelectedBin(null);
+          setHubPanelHub(null);
+          setAidEvent(ev);
+        }}
       />
 
       {/* Timeline scrubber */}

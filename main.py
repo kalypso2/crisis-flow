@@ -56,9 +56,12 @@ app = Flask(__name__)
 CORS(app)
 
 # ── Shared state ──────────────────────────────────────────────────────────
-event_queue: queue.Queue[CrisisEvent] = queue.Queue(maxsize=1000)
-processed_events: list[dict] = []          # ring buffer, last 2000
-quarantined_events: list[dict] = []        # ring buffer, last 500
+# PriorityQueue: tuples of (-severity, monotonic_counter, event)
+# Negative severity so that sev-5 sorts before sev-4, etc. (min-heap).
+event_queue: queue.PriorityQueue = queue.PriorityQueue(maxsize=1000)
+_enqueue_counter: int = 0          # tie-break to preserve insertion order within same severity
+processed_events: list[dict] = []  # ring buffer, last 500
+quarantined_events: list[dict] = []# ring buffer, last 500
 sse_subscribers: list[queue.Queue] = []    # one queue per SSE client
 _lock = threading.Lock()
 
@@ -158,11 +161,16 @@ def process_event(event: CrisisEvent) -> Optional[dict]:
         event.severity = severity.score
     if allocation:
         event.allocation = {
-            "resources": allocation.resources,
-            "eta_minutes": allocation.eta_minutes,
-            "depot_name": allocation.depot_name,
-            "depot_lat": allocation.depot_lat,
-            "depot_lon": allocation.depot_lon,
+            "resources":       allocation.resources,
+            "eta_minutes":     allocation.eta_minutes,
+            "depot_name":      allocation.depot_name,
+            "depot_org":       allocation.depot_org,
+            "depot_lat":       allocation.depot_lat,
+            "depot_lon":       allocation.depot_lon,
+            "transport_mode":  allocation.transport_mode,
+            "convoys":         allocation.convoys,
+            "need":            allocation.need,
+            "total_committed": allocation.total_committed,
         }
     event.consensus_flag = flag
 
@@ -182,11 +190,13 @@ def process_event(event: CrisisEvent) -> Optional[dict]:
     if comm:
         result["globe_color"] = comm.globe_color
         result["arc_source"] = comm.arc_source
-        result["arc_dest"] = comm.arc_dest
+        result["arc_dest"]   = comm.arc_dest
+        result["arcs"]       = comm.arcs       # multi-hub convoy arcs
     else:
         result["globe_color"] = "#888780"
-        result["arc_source"] = [0, 0]
-        result["arc_dest"] = [event.lat, event.lon]
+        result["arc_source"]  = [0, 0]
+        result["arc_dest"]    = [event.lat, event.lon]
+        result["arcs"]        = []
 
     log.info(
         "PROCESSED [%s] %s sev=%d flag=%s eta=%s",
@@ -204,7 +214,7 @@ def process_event(event: CrisisEvent) -> Optional[dict]:
 def consumer_thread():
     while True:
         try:
-            event = event_queue.get(timeout=1)
+            _priority, _counter, event = event_queue.get(timeout=1)
         except queue.Empty:
             continue
 
@@ -227,6 +237,15 @@ def consumer_thread():
 
         try:
             snowflake_store.store_event(result)
+            convoys = (result.get("allocation") or {}).get("convoys") or []
+            if convoys:
+                snowflake_store.store_convoys(
+                    event_id=result.get("id", ""),
+                    event_type=result.get("type", "unknown"),
+                    event_lat=float(result.get("lat", 0)),
+                    event_lon=float(result.get("lon", 0)),
+                    convoys=convoys,
+                )
         except Exception as exc:
             log.warning("Snowflake store failed (non-fatal): %s", exc)
 
@@ -285,8 +304,14 @@ def _enqueue(event: CrisisEvent):
         if event.id in _seen_ids:
             return
         _seen_ids[event.id] = now
+    global _enqueue_counter
     try:
-        event_queue.put_nowait(event)
+        # Priority = (-severity, counter) so higher severity processes first.
+        # Counter breaks ties by preserving arrival order within the same severity.
+        with _lock:
+            _enqueue_counter += 1
+            counter = _enqueue_counter
+        event_queue.put_nowait((-event.severity, counter, event))
     except queue.Full:
         log.warning("Event queue full — dropping event from %s", event.source)
 
@@ -453,6 +478,21 @@ def get_quarantine():
         return jsonify(list(quarantined_events))
 
 
+@app.route("/inventory")
+def get_inventory():
+    """Current UNHRD depot inventory levels across all hubs."""
+    import depot_inventory as _inv
+    data = _inv.get_inventory()
+    result = []
+    for hub_name, stock in data.items():
+        result.append({
+            "hub_name":    hub_name,
+            "stock":       stock,
+            "stock_level": _inv.stock_level(hub_name),
+        })
+    return jsonify(result)
+
+
 @app.route("/acled-static")
 def get_acled_static():
     """Serve ACLED conflict zones from Snowflake CONFLICTS table."""
@@ -497,6 +537,38 @@ def sf_summary():
     return jsonify(snowflake_store.get_all_tables_summary())
 
 
+@app.route("/convoys")
+def get_convoys():
+    """Most recent convoy dispatch records from Snowflake."""
+    limit = min(int(request.args.get("limit", 50)), 200)
+    return jsonify(snowflake_store.get_recent_convoys(limit))
+
+
+@app.route("/distribute", methods=["POST"])
+def distribute():
+    """
+    Run a week aid-distribution simulation on a caller-supplied event list.
+
+    Body: JSON array of event objects (same shape as /events response).
+    Returns: { committed, need, feed, events_served, events_unmet }
+      committed  — {event_id: {resource: qty_committed}}
+      need       — {event_id: {resource: qty_needed}}
+      feed       — chronological list of allocation entries
+    """
+    from distribution_engine import simulate_week
+    events = request.get_json(silent=True)
+    if not isinstance(events, list):
+        return jsonify({"error": "body must be a JSON array of events"}), 400
+    result = simulate_week(events)
+    return jsonify({
+        "committed":      result.committed,
+        "need":           result.need,
+        "feed":           result.feed,
+        "events_served":  result.events_served,
+        "events_unmet":   result.events_unmet,
+    })
+
+
 @app.route("/snowflake/<event_type>")
 def sf_by_type(event_type):
     """Query a specific event-type table. e.g. /snowflake/earthquake"""
@@ -536,6 +608,7 @@ if __name__ == "__main__":
     log.info("=== CrisisFlow pipeline starting ===")
 
     snowflake_store.drop_confidence_column()
+    snowflake_store.ensure_convoys_table()
 
     threading.Thread(target=consumer_thread, name="consumer", daemon=True).start()
     start_ingestion_threads()

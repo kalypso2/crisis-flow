@@ -5,6 +5,8 @@ One table per event type:
   CONFLICTS, EARTHQUAKES, FLOODS, STORMS, WILDFIRES,
   CYCLONES, VOLCANOES, DROUGHTS, ICEBERGS
 
+Plus a CONVOYS table for multi-hub aid allocation records.
+
 The CONFLICTS table has extra columns for ACLED zone-level data
 and agent enrichment fields.
 """
@@ -350,4 +352,113 @@ def get_conflicts(min_severity: int = 1, limit: int = 50) -> list[dict]:
         return results
     except Exception as exc:
         log.error("get_conflicts failed: %s", exc)
+        return []
+
+
+# ── CONVOYS table ──────────────────────────────────────────────────────────
+
+_CREATE_CONVOYS = """
+CREATE TABLE IF NOT EXISTS CONVOYS (
+    id            VARCHAR(64) PRIMARY KEY,
+    event_id      VARCHAR(64),
+    event_type    VARCHAR(32),
+    hub_name      VARCHAR(128),
+    hub_org       VARCHAR(64),
+    hub_lat       FLOAT,
+    hub_lon       FLOAT,
+    event_lat     FLOAT,
+    event_lon     FLOAT,
+    transport     VARCHAR(16),
+    dist_km       FLOAT,
+    eta_minutes   INT,
+    supplies      VARIANT,
+    dispatched_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP()
+)
+"""
+
+_CONVOY_MERGE = """
+MERGE INTO CONVOYS tgt USING (SELECT %s AS id) src ON tgt.id = src.id
+WHEN NOT MATCHED THEN INSERT (
+    id, event_id, event_type,
+    hub_name, hub_org, hub_lat, hub_lon,
+    event_lat, event_lon,
+    transport, dist_km, eta_minutes, supplies
+) VALUES (
+    %s, %s, %s,
+    %s, %s, %s, %s,
+    %s, %s,
+    %s, %s, %s, PARSE_JSON(%s)
+)
+"""
+
+
+def ensure_convoys_table() -> None:
+    """Create CONVOYS table if it doesn't exist yet."""
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.execute(_CREATE_CONVOYS)
+        conn.commit()
+        log.info("CONVOYS table ready")
+    except Exception as exc:
+        log.warning("Could not create CONVOYS table: %s", exc)
+
+
+def store_convoys(event_id: str, event_type: str,
+                  event_lat: float, event_lon: float,
+                  convoys: list[dict]) -> int:
+    """
+    Persist each convoy leg for a processed event.
+    Returns the number of rows inserted.
+    """
+    if not convoys:
+        return 0
+    stored = 0
+    try:
+        conn = _get_conn()
+        cur  = conn.cursor()
+        for c in convoys:
+            cid = f"{event_id}_{c.get('hub_name','?').replace(' ','_')}"
+            cur.execute(_CONVOY_MERGE, (
+                cid,  # MERGE key
+                cid,
+                event_id,
+                event_type,
+                c.get("hub_name", ""),
+                c.get("hub_org",  ""),
+                float(c.get("hub_lat", 0)),
+                float(c.get("hub_lon", 0)),
+                event_lat,
+                event_lon,
+                c.get("transport", "air"),
+                float(c.get("dist_km", 0)),
+                int(c.get("eta_minutes", 0)),
+                json.dumps(c.get("supplies", {})),
+            ))
+            stored += 1
+        conn.commit()
+    except Exception as exc:
+        log.error("store_convoys failed for event %s: %s", event_id, exc)
+    return stored
+
+
+def get_recent_convoys(limit: int = 50) -> list[dict]:
+    """Fetch the most recently dispatched convoy records."""
+    try:
+        conn = _get_conn()
+        cur  = conn.cursor(snowflake.connector.DictCursor)
+        cur.execute("""
+            SELECT * FROM CONVOYS
+            ORDER BY dispatched_at DESC
+            LIMIT %s
+        """, (limit,))
+        rows = []
+        for r in cur.fetchall():
+            d = dict(r)
+            if isinstance(d.get("SUPPLIES"), str):
+                d["SUPPLIES"] = json.loads(d["SUPPLIES"])
+            rows.append(d)
+        return rows
+    except Exception as exc:
+        log.error("get_recent_convoys failed: %s", exc)
         return []

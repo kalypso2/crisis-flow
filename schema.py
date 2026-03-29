@@ -96,6 +96,12 @@ class AllocationResult(AgentResult):
     depot_lat: float = 0.0
     depot_lon: float = 0.0
     depot_name: str = ""
+    depot_org: str = ""
+    transport_mode: str = "air"
+    # Multi-hub convoy data — list of {hub_name, hub_org, hub_lat, hub_lon, transport, dist_km, eta_minutes, supplies}
+    convoys: list[dict] = field(default_factory=list)
+    need: dict = field(default_factory=dict)       # AidNeed.to_dict()
+    total_committed: dict = field(default_factory=dict)
 
 @dataclass
 class CommunicationResult(AgentResult):
@@ -103,3 +109,5 @@ class CommunicationResult(AgentResult):
     globe_color: str = "#3B8BD4"   # severity colour for the globe marker
     arc_source: tuple[float, float] = (0.0, 0.0)
     arc_dest: tuple[float, float] = (0.0, 0.0)
+    # Multi-arc data for globe (one per contributing hub)
+    arcs: list[dict] = field(default_factory=list)

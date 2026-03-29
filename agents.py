@@ -16,6 +16,8 @@ import logging
 import math
 from datetime import datetime, timezone
 
+from hub_agents import MasterAllocationAgent as _MasterAllocAgent
+
 from schema import (
     CrisisEvent,
     AgentResult,
@@ -376,51 +378,55 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 class AllocationAgent:
     """
-    Selects the appropriate response resources and nearest depot.
+    Orchestrates multi-hub aid allocation using MasterAllocationAgent.
 
     Logic:
       1. Look up resource plan by (event_type, severity)
-      2. Find nearest depot by haversine distance
-      3. Estimate ETA: distance_km / 600 km·h (air freight default)
-      4. For conflict events: never route through the conflict country
-         (safety override — picks second-nearest depot)
+      2. MasterAllocationAgent solicits bids from all UNHRD/UN hubs
+      3. Greedy selection fills need from highest-scoring hubs
+      4. Commits inventory; returns full convoy manifest
 
-    Emits: AllocationResult(resources, eta_minutes, depot_lat, depot_lon, depot_name, reason)
+    Emits: AllocationResult with primary depot, convoy list, and need data.
     """
 
-    AVG_SPEED_KMH = 600  # air freight baseline
+    def __init__(self):
+        self._master = _MasterAllocAgent()
 
     def run(self, event: CrisisEvent, severity: SeverityResult) -> AllocationResult:
         ev_type = event.type
-        score = severity.score
+        score   = severity.score
 
         # Look up resource plan, fall back to sev-2 defaults
-        plans = RESOURCE_PLANS.get(ev_type, RESOURCE_PLANS["storm"])
+        plans     = RESOURCE_PLANS.get(ev_type, RESOURCE_PLANS["storm"])
         resources = plans.get(score, plans.get(2, ["assessment team"]))
 
-        # Find nearest depot
-        depots_ranked = sorted(
-            DEPOTS,
-            key=lambda d: _haversine_km(event.lat, event.lon, d["lat"], d["lon"])
+        allocation = self._master.run(
+            event_type=ev_type,
+            severity=score,
+            affected_population=event.affected_population,
+            event_lat=event.lat,
+            event_lon=event.lon,
+            resource_list=resources,
         )
-
-        chosen = depots_ranked[0]
-
-        # Conflict safety override: skip depots in same broad region if sev >= 4
-        if ev_type == "conflict" and score >= 4 and len(depots_ranked) > 1:
-            chosen = depots_ranked[1]
-
-        dist_km = _haversine_km(event.lat, event.lon, chosen["lat"], chosen["lon"])
-        eta_minutes = int((dist_km / self.AVG_SPEED_KMH) * 60)
 
         return AllocationResult(
             agent_name="allocation",
             resources=resources,
-            eta_minutes=eta_minutes,
-            depot_lat=chosen["lat"],
-            depot_lon=chosen["lon"],
-            depot_name=chosen["name"],
-            reason=f"depot={chosen['name']} dist={dist_km:.0f}km eta={eta_minutes}min resources={resources}",
+            eta_minutes=allocation.primary_eta_min,
+            depot_lat=allocation.primary_hub_lat,
+            depot_lon=allocation.primary_hub_lon,
+            depot_name=allocation.primary_hub_name,
+            depot_org=allocation.primary_hub_org,
+            transport_mode=allocation.transport_mode,
+            convoys=allocation.to_dict()["convoys"],
+            need=allocation.need.to_dict(),
+            total_committed=allocation.total_committed,
+            reason=(
+                f"primary={allocation.primary_hub_name} "
+                f"hubs={len(allocation.selected_bids)} "
+                f"eta={allocation.primary_eta_min}min "
+                f"transport={allocation.transport_mode}"
+            ),
         )
 
 
@@ -478,14 +484,40 @@ class CommunicationAgent:
         pop_str = f"Est. {event.affected_population:,} people affected. " if event.affected_population else ""
         flag_str = f" [FLAG: {consensus_flag}]" if consensus_flag else ""
 
+        num_hubs = len(allocation.convoys) if allocation.convoys else 1
+        hub_str  = f"{num_hubs} hub{'s' if num_hubs > 1 else ''}" if num_hubs > 1 else allocation.depot_name
+        transport_str = f" via {allocation.transport_mode}" if allocation.transport_mode else ""
+
         summary = (
             f"[SEVERITY {severity.score} — {sev_label} {ev_type}] "
             f"{event.title}. "
             f"Deploying: {resources_str}. "
-            f"From {allocation.depot_name} — ETA {eta_str}. "
+            f"From {hub_str}{transport_str} — ETA {eta_str}. "
             f"{pop_str}"
             f"Source: {event.source.upper()}.{flag_str}"
         )
+
+        # Build per-convoy arc entries for the globe
+        arcs = [
+            {
+                "src_lat":     c["hub_lat"],
+                "src_lon":     c["hub_lon"],
+                "hub_name":    c["hub_name"],
+                "hub_org":     c["hub_org"],
+                "transport":   c["transport"],
+                "eta_minutes": c["eta_minutes"],
+            }
+            for c in (allocation.convoys or [])
+        ]
+        if not arcs:
+            arcs = [{
+                "src_lat":     allocation.depot_lat,
+                "src_lon":     allocation.depot_lon,
+                "hub_name":    allocation.depot_name,
+                "hub_org":     allocation.depot_org,
+                "transport":   allocation.transport_mode,
+                "eta_minutes": allocation.eta_minutes,
+            }]
 
         return CommunicationResult(
             agent_name="communication",
@@ -493,5 +525,6 @@ class CommunicationAgent:
             globe_color=TYPE_COLORS.get(classification.event_type, "#888780"),
             arc_source=(allocation.depot_lat, allocation.depot_lon),
             arc_dest=(event.lat, event.lon),
+            arcs=arcs,
             reason="communication summary generated",
         )

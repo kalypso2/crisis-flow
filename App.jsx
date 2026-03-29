@@ -54,7 +54,7 @@ function SevBadge({ sev }) {
 
 // ── Flag badge ────────────────────────────────────────────────────────────
 function FlagBadge({ flag }) {
-  if (!flag) return null;
+  if (!flag || flag === "LOW_CONFIDENCE") return null;
   const color = flag === "FALLBACK_USED" ? "#D85A30" : "#EF9F27";
   return (
     <span style={{
@@ -71,8 +71,87 @@ function FlagBadge({ flag }) {
   );
 }
 
+// Resource keys aligned with distribution_engine / need_calculator
+const AID_RESOURCE_KEYS = ["shelter_kits", "food_rations", "medical_kits", "water_kits", "vehicles"];
+
+/**
+ * Aid button colour from week simulation: average fill across all five stock types.
+ * Categories with no need count as 100% for the average.
+ * Bands on average: 100% green, 51–99% yellow, 26–50% orange, 0–25% red.
+ */
+function getAidButtonStyle(ev, distResult) {
+  const neutral = {
+    border: "1px solid var(--color-border-secondary)",
+    background: "var(--color-background-secondary)",
+    color: "var(--color-text-tertiary)",
+  };
+  if (!distResult || !ev?.id) return { style: neutral, avgPct: null };
+  const needMap = distResult.need || {};
+  const committedMap = distResult.committed || {};
+  const need = needMap[ev.id];
+  const committed = committedMap[ev.id];
+  if (!need || !committed) return { style: neutral, avgPct: null };
+
+  let sum = 0;
+  for (const k of AID_RESOURCE_KEYS) {
+    const n = need[k] ?? 0;
+    if (n <= 0) {
+      sum += 1;
+      continue;
+    }
+    const c = Math.min(n, Math.max(0, committed[k] ?? 0));
+    sum += c / n;
+  }
+  const avgF = sum / AID_RESOURCE_KEYS.length;
+  const avgPct = Math.round(avgF * 100);
+
+  if (avgF >= 1) {
+    return {
+      style: {
+        border: "1px solid #1D9E7588",
+        background: "#1D9E7514",
+        color: "#1D9E75",
+      },
+      avgPct,
+    };
+  }
+  if (avgF >= 0.51) {
+    return {
+      style: {
+        border: "1px solid #C9A82099",
+        background: "#F4E04D28",
+        color: "#A67C00",
+      },
+      avgPct,
+    };
+  }
+  if (avgF >= 0.26) {
+    return {
+      style: {
+        border: "1px solid #D85A3099",
+        background: "#D85A3018",
+        color: "#D85A30",
+      },
+      avgPct,
+    };
+  }
+  return {
+    style: {
+      border: "1px solid #E24B4A99",
+      background: "#E24B4A18",
+      color: "#E24B4A",
+    },
+    avgPct,
+  };
+}
+
 // ── Single event card ─────────────────────────────────────────────────────
-function EventCard({ ev, selected, onClick }) {
+function EventCard({ ev, selected, onClick, onAidClick, distResult }) {
+  const { style: aidBtnStyle, avgPct } = getAidButtonStyle(ev, distResult);
+  const aidTitle = avgPct == null
+    ? "View aid requirements (run week simulation for fill status)"
+    : `View aid requirements — average supply fill: ${avgPct}%`;
+
   return (
     <div
       onClick={onClick}
@@ -90,6 +169,20 @@ function EventCard({ ev, selected, onClick }) {
           {ev.title}
         </span>
         <SevBadge sev={ev.severity} />
+        <button
+          onClick={e => { e.stopPropagation(); onAidClick?.(ev); }}
+          title={aidTitle}
+          style={{
+            fontSize: 10, fontWeight: 600,
+            padding: "2px 7px", borderRadius: 4,
+            cursor: "pointer",
+            whiteSpace: "nowrap",
+            lineHeight: 1.4,
+            ...aidBtnStyle,
+          }}
+        >
+          Aid
+        </button>
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <span style={{ fontSize: 11, color: "var(--color-text-tertiary)" }}>
@@ -100,6 +193,236 @@ function EventCard({ ev, selected, onClick }) {
           {ev.lat?.toFixed(2)}, {ev.lon?.toFixed(2)}
         </span>
         <FlagBadge flag={ev.consensus_flag} />
+      </div>
+    </div>
+  );
+}
+
+// ── Aid requirement panel ─────────────────────────────────────────────────
+const AID_TYPE_LABEL = {
+  shelter_kits:  { label: "Shelter Kits",   unit: "kits",        icon: "🏕️", note: "1 kit = 1 family of 5 for 30 days" },
+  food_rations:  { label: "Food Rations",   unit: "person-days", icon: "🍱", note: "2,100 kcal / person / day" },
+  medical_kits:  { label: "Medical Kits",   unit: "IEHK units",  icon: "🩺", note: "1 kit covers 10,000 people / 3 months" },
+  water_kits:    { label: "Water Kits",     unit: "units",       icon: "💧", note: "15 L / person / day for a family of 5" },
+  vehicles:      { label: "Field Vehicles", unit: "vehicles",    icon: "🚛", note: "Light 4×4 for distribution & access" },
+};
+
+// Colour of progress bar: green when full, amber when partial, red when none
+function _barColor(pct) {
+  if (pct >= 1)    return "#1D9E75";
+  if (pct >= 0.5)  return "#EF9F27";
+  if (pct > 0)     return "#D85A30";
+  return "#E24B4A";
+}
+
+function AidPanel({ ev, distResult, onClose }) {
+  if (!ev) return null;
+  const alloc     = ev.allocation || {};
+  const need      = alloc.need    || {};
+  const resources = alloc.resources || [];
+
+  // Pull committed quantities from the distribution simulation
+  const committed  = (distResult?.committed  || {})[ev.id] || {};
+  const needMap    = (distResult?.need       || {})[ev.id] || {};
+
+  // Feed entries for this specific event
+  const evFeed = (distResult?.feed || []).filter(f => f.event_id === ev.id);
+
+  const hasSphereData = (need.displaced > 0) || Object.keys(needMap).length > 0;
+
+  // Use simulation need if available (more accurate), fall back to pipeline need
+  const needQty  = (key) => needMap[key]  ?? need[key]  ?? 0;
+  const commQty  = (key) => committed[key] ?? 0;
+
+  return (
+    <div style={{ width: 360, borderLeft: "0.5px solid var(--color-border-tertiary)", display: "flex", flexDirection: "column", overflowY: "auto" }}>
+      {/* Header */}
+      <div style={{ padding: "16px 20px 12px", borderBottom: "0.5px solid var(--color-border-tertiary)", display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexShrink: 0 }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: "#1D9E75", marginBottom: 2 }}>Aid Requirements</div>
+          <div style={{ fontSize: 11, color: "var(--color-text-tertiary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 280 }}>
+            {TYPE_EMOJI[ev.type]} {ev.title}
+          </div>
+        </div>
+        <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "var(--color-text-tertiary)", padding: 0 }}>×</button>
+      </div>
+
+      <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 14 }}>
+
+        {/* Context row */}
+        <div style={{ background: "var(--color-background-secondary)", borderRadius: 8, padding: "10px 14px", display: "flex", gap: 10 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 10, color: "var(--color-text-tertiary)", marginBottom: 3 }}>Severity</div>
+            <SevBadge sev={ev.severity} />
+          </div>
+          {(need.window_days || needQty("window_days")) > 0 && (
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 10, color: "var(--color-text-tertiary)", marginBottom: 3 }}>Response window</div>
+              <div style={{ fontSize: 13, fontWeight: 500, color: "var(--color-text-primary)" }}>{need.window_days ?? needQty("window_days")} days</div>
+            </div>
+          )}
+          {(need.displaced || 0) > 0 && (
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 10, color: "var(--color-text-tertiary)", marginBottom: 3 }}>Est. displaced</div>
+              <div style={{ fontSize: 13, fontWeight: 500, color: "var(--color-text-primary)" }}>{(need.displaced || 0).toLocaleString()}</div>
+            </div>
+          )}
+        </div>
+
+        {/* A. Type of aid */}
+        <div>
+          <div style={{ fontSize: 10, letterSpacing: "0.08em", color: "var(--color-text-tertiary)", textTransform: "uppercase", marginBottom: 8 }}>
+            A. Type of Aid Needed
+          </div>
+          <div style={{ background: "var(--color-background-secondary)", borderRadius: 8, padding: "10px 14px", display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {resources.length > 0
+              ? resources.map(r => (
+                  <span key={r} style={{ fontSize: 12, background: "#1D9E7514", border: "1px solid #1D9E7544", borderRadius: 4, padding: "3px 9px", color: "#1D9E75" }}>{r}</span>
+                ))
+              : <span style={{ fontSize: 12, color: "var(--color-text-tertiary)" }}>Assessment required</span>
+            }
+          </div>
+        </div>
+
+        {/* B. Quantities + progress bars */}
+        <div>
+          <div style={{ fontSize: 10, letterSpacing: "0.08em", color: "var(--color-text-tertiary)", textTransform: "uppercase", marginBottom: 8 }}>
+            B. Quantities Required & Distributed
+          </div>
+          {hasSphereData ? (
+            <div style={{ background: "var(--color-background-secondary)", borderRadius: 8, overflow: "hidden" }}>
+              {Object.entries(AID_TYPE_LABEL).map(([key, meta], i, arr) => {
+                const needed = needQty(key);
+                const given  = commQty(key);
+                if (needed === 0) return null;
+                const pct = Math.min(1, needed > 0 ? given / needed : 0);
+                const barColor = _barColor(pct);
+                const isLast = i === arr.length - 1 || !Object.entries(AID_TYPE_LABEL).slice(i + 1).some(([k]) => needQty(k) > 0);
+                return (
+                  <div key={key} style={{
+                    padding: "10px 14px",
+                    borderBottom: isLast ? "none" : "0.5px solid var(--color-border-tertiary)",
+                  }}>
+                    {/* Label + amounts */}
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 4 }}>
+                      <span style={{ fontSize: 16, lineHeight: 1 }}>{meta.icon}</span>
+                      <span style={{ fontSize: 12, fontWeight: 500, color: "var(--color-text-primary)", flex: 1 }}>{meta.label}</span>
+                      <span style={{ fontSize: 11, color: "var(--color-text-tertiary)" }}>
+                        <span style={{ fontWeight: 600, color: barColor }}>{given.toLocaleString()}</span>
+                        {" / "}{needed.toLocaleString()}
+                        {" "}<span style={{ fontSize: 10 }}>{meta.unit}</span>
+                      </span>
+                    </div>
+                    {/* Progress bar */}
+                    <div style={{ height: 5, borderRadius: 3, background: "var(--color-border-secondary)" }}>
+                      <div style={{ height: 5, borderRadius: 3, background: barColor, width: `${Math.round(pct * 100)}%`, transition: "width 0.4s, background 0.4s" }} />
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 2 }}>
+                      <span style={{ fontSize: 10, color: "var(--color-text-tertiary)", fontStyle: "italic" }}>{meta.note}</span>
+                      <span style={{ fontSize: 10, fontWeight: 600, color: barColor }}>{Math.round(pct * 100)}%</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div style={{ background: "var(--color-background-secondary)", borderRadius: 8, padding: 14, fontSize: 12, color: "var(--color-text-tertiary)", textAlign: "center" }}>
+              {distResult ? "Below deployment threshold (sev ≤ 1)" : "Run week simulation to see distribution"}
+            </div>
+          )}
+        </div>
+
+        {/* Per-event allocation feed */}
+        {evFeed.length > 0 && (
+          <div>
+            <div style={{ fontSize: 10, letterSpacing: "0.08em", color: "var(--color-text-tertiary)", textTransform: "uppercase", marginBottom: 8 }}>
+              Hub Contributions (priority #{evFeed[0]?.priority_rank})
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {evFeed.map((entry, i) => (
+                <div key={i} style={{ background: "var(--color-background-secondary)", borderRadius: 8, padding: "10px 12px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                    <span style={{ fontSize: 12, fontWeight: 500, color: "var(--color-text-primary)" }}>
+                      ✈️ {entry.hub_name}
+                    </span>
+                    {entry.needs_fully_met && i === evFeed.length - 1 && (
+                      <span style={{ fontSize: 10, background: "#1D9E7520", color: "#1D9E75", borderRadius: 3, padding: "1px 5px", fontWeight: 600 }}>
+                        FULLY MET
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 10, color: "var(--color-text-tertiary)", marginBottom: 6 }}>{entry.hub_org}</div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                    {Object.entries(entry.supplies).filter(([, v]) => v > 0).map(([k, v]) => (
+                      <span key={k} style={{ fontSize: 10, background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-secondary)", borderRadius: 3, padding: "2px 6px", color: "var(--color-text-secondary)" }}>
+                        {AID_TYPE_LABEL[k]?.icon} {k.replace(/_/g, " ")}: <strong>{v.toLocaleString()}</strong>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {evFeed.length === 0 && distResult && hasSphereData && (
+          <div style={{ fontSize: 11, color: "#D85A30", background: "#D85A3010", border: "1px solid #D85A3030", borderRadius: 6, padding: "8px 12px" }}>
+            ⚠ No hubs had sufficient stock to serve this event this week.
+          </div>
+        )}
+
+        {(need.notes || []).length > 0 && (
+          <div style={{ fontSize: 10, color: "var(--color-text-tertiary)", fontStyle: "italic", lineHeight: 1.5 }}>
+            {need.notes.join(" · ")}
+          </div>
+        )}
+
+        <div style={{ fontSize: 10, color: "var(--color-text-tertiary)", borderTop: "0.5px solid var(--color-border-tertiary)", paddingTop: 10 }}>
+          Based on Sphere Handbook 2018. Initial emergency phase only.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Transport icon ────────────────────────────────────────────────────────
+const TRANSPORT_ICON = { air: "✈️", land: "🚛", sea: "🚢" };
+
+// ── Stock level colour ────────────────────────────────────────────────────
+const STOCK_COLOR = { high: "#1D9E75", medium: "#EF9F27", low: "#D85A30", critical: "#E24B4A", unknown: "#888780" };
+
+// ── Inventory bar — shown in the sidebar footer ───────────────────────────
+function InventoryBar({ inventory }) {
+  if (!inventory || inventory.length === 0) return null;
+  return (
+    <div style={{ borderTop: "0.5px solid var(--color-border-tertiary)", padding: "10px 14px" }}>
+      <div style={{ fontSize: 10, letterSpacing: "0.08em", color: "var(--color-text-tertiary)", marginBottom: 8 }}>
+        HUB INVENTORY
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        {inventory.map(hub => {
+          const pct = {
+            high: 80, medium: 50, low: 20, critical: 5, unknown: 0,
+          }[hub.stock_level] ?? 0;
+          const color = STOCK_COLOR[hub.stock_level];
+          return (
+            <div key={hub.hub_name} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
+                  <span style={{ fontSize: 10, color: "var(--color-text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 140 }}>
+                    {hub.hub_name.replace(" UNHRD", "").replace(" UNHCR", "").replace(" OCHA", "").replace(" WFP", "")}
+                  </span>
+                  <span style={{ fontSize: 10, color, fontWeight: 600 }}>
+                    {hub.stock_level}
+                  </span>
+                </div>
+                <div style={{ height: 4, borderRadius: 2, background: "var(--color-border-secondary)" }}>
+                  <div style={{ height: 4, borderRadius: 2, background: color, width: `${pct}%`, transition: "width 0.5s" }} />
+                </div>
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -176,9 +499,11 @@ function DetailPanel({ ev, binEvents, onSelectBinEvent, onClose }) {
       </Section>
 
       {alloc.depot_name && (
-        <Section title="Resource allocation">
-          <Row label="Depot">{alloc.depot_name}</Row>
-          <Row label="ETA">{alloc.eta_minutes} min</Row>
+        <Section title="Aid deployment">
+          <Row label="Lead hub">{alloc.depot_name}</Row>
+          {alloc.depot_org && <Row label="Organisation">{alloc.depot_org}</Row>}
+          <Row label="Transport">{TRANSPORT_ICON[alloc.transport_mode] || "✈️"} {alloc.transport_mode || "air"}</Row>
+          <Row label="Lead ETA">{alloc.eta_minutes} min</Row>
           <Row label="Resources">
             <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 2 }}>
               {(alloc.resources || []).map(r => (
@@ -186,6 +511,50 @@ function DetailPanel({ ev, binEvents, onSelectBinEvent, onClose }) {
               ))}
             </div>
           </Row>
+        </Section>
+      )}
+
+      {alloc.need && alloc.need.displaced > 0 && (
+        <Section title="Aid need (Sphere standards)">
+          <Row label="Est. displaced">{(alloc.need.displaced || 0).toLocaleString()}</Row>
+          <Row label="Planning window">{alloc.need.window_days} days</Row>
+          <Row label="Shelter kits">{(alloc.need.shelter_kits || 0).toLocaleString()}</Row>
+          <Row label="Food rations">{(alloc.need.food_rations || 0).toLocaleString()}</Row>
+          <Row label="Medical kits">{(alloc.need.medical_kits || 0).toLocaleString()}</Row>
+          <Row label="Water kits">{(alloc.need.water_kits || 0).toLocaleString()}</Row>
+          <Row label="Vehicles">{alloc.need.vehicles || 0}</Row>
+          {(alloc.need.notes || []).length > 0 && (
+            <div style={{ marginTop: 6, fontSize: 11, color: "var(--color-text-tertiary)", fontStyle: "italic" }}>
+              {alloc.need.notes.join(" · ")}
+            </div>
+          )}
+        </Section>
+      )}
+
+      {(alloc.convoys || []).length > 1 && (
+        <Section title={`Convoys (${alloc.convoys.length} hubs)`}>
+          {alloc.convoys.map((c, i) => (
+            <div key={i} style={{ borderBottom: i < alloc.convoys.length - 1 ? "0.5px solid var(--color-border-tertiary)" : "none", paddingBottom: 8, marginBottom: 8 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                <span style={{ fontSize: 12, fontWeight: 500, color: "var(--color-text-primary)" }}>
+                  {TRANSPORT_ICON[c.transport] || "✈️"} {c.hub_name}
+                </span>
+                <span style={{ fontSize: 11, color: "var(--color-text-tertiary)" }}>
+                  {c.eta_minutes}m · {Math.round(c.dist_km)} km
+                </span>
+              </div>
+              {c.hub_org && (
+                <div style={{ fontSize: 11, color: "var(--color-text-tertiary)", marginBottom: 4 }}>{c.hub_org}</div>
+              )}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
+                {Object.entries(c.supplies || {}).filter(([,v]) => v > 0).map(([k, v]) => (
+                  <span key={k} style={{ fontSize: 10, background: "var(--color-background-secondary)", border: "0.5px solid var(--color-border-secondary)", borderRadius: 3, padding: "1px 5px", color: "var(--color-text-secondary)" }}>
+                    {k.replace("_", " ")}: {v.toLocaleString()}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
         </Section>
       )}
 
@@ -272,16 +641,38 @@ function GlobePanel({ events, onSelect }) {
   [events]);
 
   const arcsData = useMemo(() => {
-    return events
-      .filter((ev) => Array.isArray(ev.arc_source) && Array.isArray(ev.arc_dest))
-      .filter((ev) => ev.arc_source.length >= 2 && ev.arc_dest.length >= 2)
-      .map((ev) => ({
-        startLat: ev.arc_source[0],
-        startLng: ev.arc_source[1],
-        endLat: ev.arc_dest[0],
-        endLng: ev.arc_dest[1],
-        color: TYPE_COLOR[ev.type] || "#888888",
-      }));
+    const result = [];
+    for (const ev of events) {
+      const dest = ev.arc_dest;
+      if (!Array.isArray(dest) || dest.length < 2) continue;
+      const color = TYPE_COLOR[ev.type] || "#888888";
+
+      // Multi-hub: one arc per convoy leg
+      if (Array.isArray(ev.arcs) && ev.arcs.length > 0) {
+        for (const arc of ev.arcs) {
+          if (arc.src_lat != null && arc.src_lon != null) {
+            result.push({
+              startLat: arc.src_lat,
+              startLng: arc.src_lon,
+              endLat:   dest[0],
+              endLng:   dest[1],
+              color,
+              hubName:  arc.hub_name || "",
+              transport: arc.transport || "air",
+            });
+          }
+        }
+      } else if (Array.isArray(ev.arc_source) && ev.arc_source.length >= 2) {
+        result.push({
+          startLat: ev.arc_source[0],
+          startLng: ev.arc_source[1],
+          endLat:   dest[0],
+          endLng:   dest[1],
+          color,
+        });
+      }
+    }
+    return result;
   }, [events]);
 
   useEffect(() => {
@@ -440,6 +831,110 @@ function StatsBar({ events, filter, onFilter }) {
   );
 }
 
+// ── Global distribution feed ──────────────────────────────────────────────
+const TYPE_LABEL = {
+  earthquake: "Earthquake", flood: "Flood", cyclone: "Cyclone", volcano: "Volcano",
+  wildfire: "Wildfire", drought: "Drought", storm: "Storm", conflict: "Conflict", iceberg: "Iceberg",
+};
+const SEV_BG = { 5: "#E24B4A22", 4: "#D85A3022", 3: "#EF9F2722", 2: "#1D9E7522", 1: "#37ADD422" };
+
+function DistributionFeed({ distResult, visible, onToggle }) {
+  const feed = distResult?.feed || [];
+  const served = distResult?.events_served ?? 0;
+  const unmet  = distResult?.events_unmet  ?? 0;
+
+  return (
+    <div style={{
+      borderTop: "0.5px solid var(--color-border-tertiary)",
+      background: "var(--color-background-primary)",
+      flexShrink: 0,
+    }}>
+      {/* Toggle bar */}
+      <button
+        onClick={onToggle}
+        style={{
+          width: "100%", display: "flex", alignItems: "center", gap: 10,
+          padding: "8px 18px", background: "none", border: "none",
+          cursor: "pointer", borderBottom: visible ? "0.5px solid var(--color-border-tertiary)" : "none",
+          fontFamily: "inherit",
+        }}
+      >
+        <span style={{ fontSize: 10, letterSpacing: "0.08em", color: "var(--color-text-tertiary)", textTransform: "uppercase" }}>
+          Distribution Feed
+        </span>
+        {distResult && (
+          <>
+            <span style={{ fontSize: 10, background: "#1D9E7520", color: "#1D9E75", borderRadius: 3, padding: "1px 6px" }}>
+              {served} fully served
+            </span>
+            {unmet > 0 && (
+              <span style={{ fontSize: 10, background: "#D85A3020", color: "#D85A30", borderRadius: 3, padding: "1px 6px" }}>
+                {unmet} unmet
+              </span>
+            )}
+            <span style={{ fontSize: 10, color: "var(--color-text-tertiary)" }}>{feed.length} allocations</span>
+          </>
+        )}
+        <div style={{ flex: 1 }} />
+        <span style={{ fontSize: 12, color: "var(--color-text-tertiary)" }}>{visible ? "▼" : "▲"}</span>
+      </button>
+
+      {visible && (
+        <div style={{ maxHeight: 200, overflowY: "auto", padding: "6px 0" }}>
+          {feed.length === 0 ? (
+            <div style={{ padding: "16px", textAlign: "center", fontSize: 12, color: "var(--color-text-tertiary)" }}>
+              {distResult ? "No allocations — all hubs empty or no eligible events." : "Move the week slider to run distribution."}
+            </div>
+          ) : (
+            feed.map((entry, i) => (
+              <div key={i} style={{
+                display: "flex", alignItems: "flex-start", gap: 10,
+                padding: "6px 18px",
+                background: i % 2 === 0 ? "transparent" : "var(--color-background-secondary)",
+                borderLeft: `3px solid ${TYPE_COLOR[entry.event_type] || "#888"}`,
+              }}>
+                {/* Priority rank badge */}
+                <div style={{
+                  minWidth: 22, height: 22, borderRadius: "50%",
+                  background: SEV_BG[entry.severity] || "#88888822",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 10, fontWeight: 700,
+                  color: SEV_COLOR[entry.severity] || "#888",
+                  flexShrink: 0,
+                }}>
+                  #{entry.priority_rank}
+                </div>
+                {/* Hub → event */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: "var(--color-text-primary)", whiteSpace: "nowrap" }}>
+                      {entry.hub_name}
+                    </span>
+                    <span style={{ fontSize: 11, color: "var(--color-text-tertiary)" }}>→</span>
+                    <span style={{ fontSize: 11, color: "var(--color-text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 240 }}>
+                      {TYPE_EMOJI[entry.event_type]} {entry.event_title}
+                    </span>
+                    {entry.needs_fully_met && (
+                      <span style={{ fontSize: 9, background: "#1D9E7520", color: "#1D9E75", borderRadius: 3, padding: "1px 4px", fontWeight: 600, whiteSpace: "nowrap" }}>✓ FILLED</span>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 3, marginTop: 3 }}>
+                    {Object.entries(entry.supplies).filter(([, v]) => v > 0).map(([k, v]) => (
+                      <span key={k} style={{ fontSize: 9, background: "var(--color-background-secondary)", border: "0.5px solid var(--color-border-secondary)", borderRadius: 2, padding: "1px 4px", color: "var(--color-text-tertiary)" }}>
+                        {AID_TYPE_LABEL[k]?.icon} {v.toLocaleString()} {k.replace(/_/g, " ")}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Week helpers ──────────────────────────────────────────────────────────
 /** Returns a new Date set to Monday 00:00:00 of the week containing `date`. */
 function getWeekStart(date) {
@@ -579,6 +1074,7 @@ function normalizeRow(row, fallbackType) {
     globe_color: lower.globe_color || "#888780",
     arc_source: tryParseJson(lower.arc_source, [0, 0]),
     arc_dest: tryParseJson(lower.arc_dest, [lat, lon]),
+    arcs: tryParseJson(lower.arcs, []),
     country: lower.country || "",
     admin1: lower.admin1 || "",
     total_events: lower.total_events,
@@ -589,10 +1085,15 @@ function normalizeRow(row, fallbackType) {
 export default function App() {
   const [events, setEvents] = useState([]);
   const [selected, setSelected] = useState(null);
-  const [selectedBin, setSelectedBin] = useState(null); // all events in a clicked hex bin
+  const [selectedBin, setSelectedBin] = useState(null);
   const [health, setHealth] = useState(null);
   const [connected, setConnected] = useState(false);
   const [filter, setFilter] = useState("all");
+  const [inventory, setInventory] = useState([]);
+  const [aidEvent, setAidEvent] = useState(null);
+  const [distResult, setDistResult] = useState(null);   // simulation result for current week
+  const [feedOpen, setFeedOpen] = useState(true);        // distribution feed expanded?
+  const [distributing, setDistributing] = useState(false);
 
   // Week timeline state — max week is locked to the week the site first loaded
   const loadWeekRef = useRef(getWeekStart(new Date()));
@@ -650,10 +1151,17 @@ export default function App() {
     });
   }, [events, selectedWeekStart]);
 
-  // Then apply type filter on top of the week slice
-  const displayedEvents = useMemo(() =>
-    filter === "all" ? weekFilteredEvents : weekFilteredEvents.filter(ev => ev.type === filter),
-  [weekFilteredEvents, filter]);
+  // Then apply type filter on top of the week slice, sorted highest severity first
+  const displayedEvents = useMemo(() => {
+    const filtered = filter === "all" ? weekFilteredEvents : weekFilteredEvents.filter(ev => ev.type === filter);
+    return [...filtered].sort((a, b) => (b.severity ?? 0) - (a.severity ?? 0));
+  }, [weekFilteredEvents, filter]);
+
+  // Re-run distribution whenever the week's events change (week slider moved)
+  useEffect(() => {
+    runDistribution(weekFilteredEvents);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weekFilteredEvents]);
 
 
   // Health polling
@@ -664,6 +1172,34 @@ export default function App() {
     const id = setInterval(poll, 10000);
     return () => clearInterval(id);
   }, [healthUrl]);
+
+  // Inventory polling — every 60s
+  useEffect(() => {
+    const poll = () =>
+      fetch(`${base}/inventory`).then(r => r.json()).then(setInventory).catch(() => {});
+    poll();
+    const id = setInterval(poll, 60_000);
+    return () => clearInterval(id);
+  }, [base]);
+
+  // Distribution simulation — re-runs whenever the week's events change
+  // weekFilteredEvents is defined below, so we use a ref-based approach:
+  // we trigger on weekFilteredEvents via a separate effect after it's computed.
+  const runDistribution = (eventsForWeek) => {
+    if (!eventsForWeek || eventsForWeek.length === 0) {
+      setDistResult(null);
+      return;
+    }
+    setDistributing(true);
+    fetch(`${base}/distribute`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(eventsForWeek),
+    })
+      .then(r => r.json())
+      .then(data => { setDistResult(data); setDistributing(false); })
+      .catch(() => setDistributing(false));
+  };
 
   return (
     <div style={{
@@ -681,6 +1217,11 @@ export default function App() {
           Autonomous disaster response system
         </span>
         <div style={{ flex: 1 }} />
+        {distributing && (
+          <span style={{ fontSize: 10, color: "#EF9F27", background: "#EF9F2715", borderRadius: 4, padding: "2px 8px" }}>
+            distributing…
+          </span>
+        )}
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <div style={{
             width: 7, height: 7, borderRadius: "50%",
@@ -712,11 +1253,14 @@ export default function App() {
                 key={ev.id}
                 ev={ev}
                 selected={selected?.id === ev.id}
-                onClick={() => { setSelectedBin(null); setSelected(ev); }}
+                onClick={() => { setSelectedBin(null); setSelected(ev); setAidEvent(null); }}
+                onAidClick={ev => { setSelected(null); setSelectedBin(null); setAidEvent(ev); }}
+                distResult={distResult}
               />
             ))}
           </div>
           <HealthPanel health={health} />
+          <InventoryBar inventory={inventory} />
         </div>
 
         {/* Globe + detail */}
@@ -728,9 +1272,11 @@ export default function App() {
               if (Array.isArray(points)) {
                 setSelectedBin(points.length > 1 ? points : null);
                 setSelected(points[0] ?? null);
+                setAidEvent(null);
               } else {
                 setSelectedBin(null);
                 setSelected(points);
+                setAidEvent(null);
               }
             }}
           />
@@ -750,13 +1296,29 @@ export default function App() {
             />
           </div>
         )}
+
+        {/* Aid panel */}
+        {aidEvent && (
+          <AidPanel
+            ev={aidEvent}
+            distResult={distResult}
+            onClose={() => setAidEvent(null)}
+          />
+        )}
       </div>
+
+      {/* Distribution feed */}
+      <DistributionFeed
+        distResult={distResult}
+        visible={feedOpen}
+        onToggle={() => setFeedOpen(v => !v)}
+      />
 
       {/* Timeline scrubber */}
       <TimelineScrubber
         weekBounds={weekBounds}
         selectedIdx={selectedWeekIdx}
-        onChange={setSelectedWeekIdx}
+        onChange={idx => { setSelectedWeekIdx(idx); }}
       />
     </div>
   );

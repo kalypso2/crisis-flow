@@ -38,14 +38,16 @@ from schema import CrisisEvent
 from need_calculator import scrub_event_allocation_need_notes
 from adapters import (
     USGSAdapter, NOAAAdapter, GDACSAdapter, EONETAdapter,
-    ACLEDAdapter, TwitterAdapter,
+    ACLEDAdapter,
 )
 from agents import (
     DetectionAgent, ClassificationAgent, SeverityAgent,
     AllocationAgent, CommunicationAgent,
 )
 from consensus import ConsensusEngine, is_degraded
+from coordinator import CoordinatorAgent, DebateAgent, ReflectionAgent, SimulationAgent
 import snowflake_store
+import feedback_store
 
 logging.basicConfig(
     level=logging.INFO,
@@ -80,13 +82,27 @@ severity_agent     = SeverityAgent()
 allocation_agent   = AllocationAgent()
 communication_agent = CommunicationAgent()
 consensus_engine   = ConsensusEngine()
+coordinator_agent  = CoordinatorAgent()
+debate_agent       = DebateAgent()
+reflection_agent   = ReflectionAgent()
+simulation_agent   = SimulationAgent()
+
+# ── Claude Opus client (optional — degrades gracefully if key missing) ────
+_claude = None
+try:
+    from claude_manager import ClaudeManager
+    _claude = ClaudeManager()
+    log.info("Claude AI enrichment: ENABLED")
+except Exception as _claude_err:
+    log.warning("Claude AI enrichment: DISABLED (%s)", _claude_err)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Agent runner
 # ═══════════════════════════════════════════════════════════════════════════
 
-AGENT_TIMEOUT = 5.0  # seconds per agent
+AGENT_TIMEOUT     = 5.0   # seconds — rule-based agents
+AI_AGENT_TIMEOUT  = 45.0  # seconds — LLM-backed agents (allocation needs extra time)
 
 
 def _run_with_timeout(fn, *args, timeout=AGENT_TIMEOUT):
@@ -124,7 +140,10 @@ def process_event(event: CrisisEvent) -> Optional[dict]:
     if is_degraded("detection"):
         detection = None
     else:
-        detection = _run_with_timeout(detection_agent.run, event)
+        detection = _run_with_timeout(
+            detection_agent.run, event, _claude,
+            timeout=AI_AGENT_TIMEOUT if _claude else AGENT_TIMEOUT,
+        )
 
     if detection is not None and not detection.accepted:
         log.info("Event %s REJECTED by detection: %s", event.id[:8], detection.reason)
@@ -134,25 +153,107 @@ def process_event(event: CrisisEvent) -> Optional[dict]:
     if is_degraded("classification"):
         classification = None
     else:
-        classification = _run_with_timeout(classification_agent.run, event)
+        classification = _run_with_timeout(
+            classification_agent.run, event, _claude,
+            timeout=AI_AGENT_TIMEOUT if _claude else AGENT_TIMEOUT,
+        )
 
-    # ── Severity ─────────────────────────────────────────────────────────
+    # ── Severity (rule-based + optional Claude enrichment) ───────────────
     if is_degraded("severity"):
         severity = None
     else:
         sev_input = classification or type("_", (), {"event_type": event.type, "domain_tags": []})()
-        severity = _run_with_timeout(severity_agent.run, event, sev_input)
+        _feedback_ctx = feedback_store.get_prompt_context(event.type) if _claude else ""
+        severity = _run_with_timeout(
+            severity_agent.run, event, sev_input, _claude, _feedback_ctx,
+            timeout=AI_AGENT_TIMEOUT if _claude else AGENT_TIMEOUT,
+        )
+
+    # ── Debate: if adapter estimate and agent score diverge >= 2 ─────────
+    debate_result = None
+    if _claude is not None and severity is not None:
+        spread = abs(severity.score - event.severity)
+        if spread >= 2:
+            debate_result = _run_with_timeout(
+                debate_agent.run,
+                event,
+                event.severity, f"Initial {event.source} adapter estimate",
+                severity.score, severity.reason,
+                _claude,
+                timeout=AI_AGENT_TIMEOUT,
+            )
+            if debate_result and debate_result.winning_score:
+                severity.score = debate_result.winning_score
+                severity.reason = (
+                    f"[DEBATE:{debate_result.winning_position}] "
+                    f"{debate_result.debate_summary} | {severity.reason}"
+                )
+                log.info(
+                    "DEBATE resolved severity to %d (position=%s) for event %s",
+                    debate_result.winning_score, debate_result.winning_position, event.id[:8],
+                )
 
     # ── Allocation ───────────────────────────────────────────────────────
     if is_degraded("allocation"):
         allocation = None
     else:
-        allocation = _run_with_timeout(allocation_agent.run, event, severity)
+        allocation = _run_with_timeout(
+            allocation_agent.run, event, severity, _claude, _feedback_ctx,
+            timeout=AI_AGENT_TIMEOUT if _claude else AGENT_TIMEOUT,
+        )
 
     # ── Consensus ────────────────────────────────────────────────────────
     detection, classification, severity, allocation, flag = consensus_engine.resolve(
         event, detection, classification, severity, allocation
     )
+
+    # ── Coordinator: final AI review of all results ───────────────────────
+    coordinator_result = None
+    if _claude is not None:
+        coordinator_result = _run_with_timeout(
+            coordinator_agent.run,
+            event, classification, severity, allocation, _claude,
+            timeout=AI_AGENT_TIMEOUT,
+        )
+        if coordinator_result and coordinator_result.severity_override is not None:
+            log.info(
+                "COORDINATOR overriding severity %d → %d: %s",
+                severity.score if severity else "?",
+                coordinator_result.severity_override,
+                coordinator_result.reasoning,
+            )
+            if severity:
+                severity.score = coordinator_result.severity_override
+            event.severity = coordinator_result.severity_override
+
+    # ── Collect per-agent reasoning for UI display (core agents) ────────────
+    agent_reasoning: dict = {}
+    for result_obj, name in [
+        (detection, "detection"),
+        (classification, "classification"),
+        (severity, "severity"),
+        (allocation, "allocation"),
+    ]:
+        if result_obj:
+            agent_reasoning[name] = {
+                "reason":     result_obj.reason,
+                "confidence": getattr(result_obj, "confidence", 1.0),
+                "reasoning":  getattr(result_obj, "reasoning", ""),
+            }
+    if debate_result:
+        agent_reasoning["debate"] = {
+            "winning_position": debate_result.winning_position,
+            "winning_score":    debate_result.winning_score,
+            "reasoning":        debate_result.debate_summary,
+            "confidence":       debate_result.confidence,
+        }
+    if coordinator_result:
+        agent_reasoning["coordinator"] = {
+            "recommendation":         coordinator_result.final_recommendation,
+            "inconsistency_detected": coordinator_result.inconsistency_detected,
+            "reasoning":              coordinator_result.reasoning,
+            "confidence":             coordinator_result.confidence,
+        }
 
     # ── Apply resolved results to event ──────────────────────────────────
     if classification:
@@ -182,17 +283,74 @@ def process_event(event: CrisisEvent) -> Optional[dict]:
     else:
         comm = _run_with_timeout(
             communication_agent.run,
-            event, detection, classification, severity, allocation, flag
+            event, detection, classification, severity, allocation, flag, _claude,
+            timeout=AI_AGENT_TIMEOUT if _claude else AGENT_TIMEOUT,
         )
         if comm:
             event.action_summary = comm.summary
 
+    # ── Reflection: post-decision quality review ──────────────────────────
+    reflection_result = None
+    if _claude is not None:
+        reflection_result = _run_with_timeout(
+            reflection_agent.run,
+            event, severity, allocation, coordinator_result, _claude,
+            timeout=AI_AGENT_TIMEOUT,
+        )
+
+    # ── Simulation: escalation scenario projection ────────────────────────
+    simulation_result = None
+    if _claude is not None:
+        simulation_result = _run_with_timeout(
+            simulation_agent.run,
+            event, severity, _claude,
+            timeout=AI_AGENT_TIMEOUT,
+        )
+
+    # ── Record reflection into feedback loop for future events ───────────
+    if reflection_result and reflection_result.assessment:
+        feedback_store.record(
+            event_type=event.type,
+            assessment=reflection_result.assessment,
+            concerns=reflection_result.concerns,
+            suggestions=reflection_result.suggestions,
+            confidence=reflection_result.confidence,
+            location=event.location_name or "",
+        )
+        log.info(
+            "Feedback recorded: type=%s assessment=%s",
+            event.type, reflection_result.assessment,
+        )
+
+    # ── Add reflection + simulation to agent_reasoning ────────────────────
+    if reflection_result:
+        agent_reasoning["reflection"] = {
+            "assessment":   reflection_result.assessment,
+            "concerns":     reflection_result.concerns,
+            "suggestions":  reflection_result.suggestions,
+            "reasoning":    reflection_result.reasoning,
+            "confidence":   reflection_result.confidence,
+        }
+    if simulation_result:
+        agent_reasoning["simulation"] = {
+            "projected_severity":            simulation_result.projected_severity,
+            "projected_affected_population": simulation_result.projected_affected_population,
+            "additional_resources":          simulation_result.additional_resources,
+            "pre_position_hubs":             simulation_result.pre_position_hubs,
+            "early_warning":                 simulation_result.early_warning,
+            "reasoning":                     simulation_result.reasoning,
+            "confidence":                    simulation_result.confidence,
+        }
+    event.agent_reasoning = agent_reasoning
+
     result = event.to_dict()
     if comm:
-        result["globe_color"] = comm.globe_color
-        result["arc_source"] = comm.arc_source
-        result["arc_dest"]   = comm.arc_dest
-        result["arcs"]       = comm.arcs       # multi-hub convoy arcs
+        result["globe_color"]          = comm.globe_color
+        result["arc_source"]           = comm.arc_source
+        result["arc_dest"]             = comm.arc_dest
+        result["arcs"]                 = comm.arcs
+        result["citizen_alert"]        = comm.citizen_alert
+        result["operational_summary"]  = comm.operational_summary
     else:
         result["globe_color"] = "#888780"
         result["arc_source"]  = [0, 0]
@@ -348,14 +506,6 @@ def start_ingestion_threads():
         t.start()
         log.info("Started ingestion thread: %s (every %ds)", name, interval)
 
-    # Twitter stream (persistent connection, not poll)
-    twitter = TwitterAdapter()
-    t = threading.Thread(
-        target=twitter.stream, args=(_enqueue,),
-        name="ingest-Twitter", daemon=True,
-    )
-    t.start()
-    log.info("Started Twitter filtered stream thread")
 
 
 def ingest_static_acled_once():
@@ -617,6 +767,7 @@ if __name__ == "__main__":
     log.info("=== CrisisFlow pipeline starting ===")
 
     snowflake_store.drop_confidence_column()
+    snowflake_store.ensure_ai_columns()
     snowflake_store.ensure_convoys_table()
 
     threading.Thread(target=consumer_thread, name="consumer", daemon=True).start()

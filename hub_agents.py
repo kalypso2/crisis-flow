@@ -24,6 +24,7 @@ MasterAllocationAgent:
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from dataclasses import dataclass, field
@@ -264,6 +265,8 @@ class MultiHubAllocation:
     primary_eta_min:  int = 0
     transport_mode:   str = "air"
     resources:        list[str] = field(default_factory=list)
+    allocation_reasoning: str = ""   # Claude's justification for hub selection
+    allocation_concerns:  str = ""   # Claude's flagged concerns
 
     def to_dict(self) -> dict:
         return {
@@ -292,6 +295,68 @@ class MultiHubAllocation:
         }
 
 
+# ── AI allocation helpers ─────────────────────────────────────────────────
+
+def _format_hub_proposal(bid: Bid, event_type: str) -> str:
+    """Format a hub bid as a natural-language proposal for Claude to evaluate."""
+    supplies_str = ", ".join(
+        f"{qty:,} {item.replace('_', ' ')}"
+        for item, qty in bid.contribution.items()
+        if qty > 0
+    )
+    return (
+        f"{bid.hub_name} ({bid.hub_org}) proposes: {supplies_str or 'assessment support'} "
+        f"via {bid.transport}. Distance: {bid.dist_km:,.0f} km, ETA: {bid.eta_minutes} min. "
+        f"Score: {bid.score:.2f}."
+    )
+
+
+def _claude_select_allocation(
+    bids: list[Bid],
+    event_type: str,
+    severity: int,
+    need: AidNeed,
+    claude,
+    feedback_ctx: str = "",
+) -> Optional[dict]:
+    """
+    Ask Claude to select the optimal hub combination from ranked proposals.
+    Returns {"selected_hub_names": [...], "reasoning": "...", "concerns": "..."} or None.
+    """
+    proposals = "\n".join(
+        f"  {i}. {_format_hub_proposal(b, event_type)}"
+        for i, b in enumerate(bids, 1)
+    )
+    feedback_section = f"\n{feedback_ctx}\n" if feedback_ctx else ""
+    prompt = f"""You are the allocation coordinator for a global crisis response system.
+
+Event: {event_type} at severity {severity}/5
+Total need: {json.dumps(need.to_dict())}
+{feedback_section}
+Hub proposals ({len(bids)} available):
+{proposals}
+
+Select the optimal combination of hubs that:
+1. Covers the total need as fully as possible
+2. Minimises overall ETA to affected population
+3. Accounts for hub specialization and proximity
+4. Avoids over-committing from a single hub
+
+Return ONLY valid JSON, no markdown:
+{{"selected_hub_names": ["<hub_name_1>", ...], "reasoning": "<2-3 sentences>", "concerns": "<gaps or logistics concerns, or empty string>"}}"""
+
+    try:
+        raw = claude.call(prompt, use_cache=True)
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = "\n".join(raw.split("\n")[1:])
+            raw = raw.rstrip("` \n")
+        return json.loads(raw)
+    except Exception as exc:
+        log.warning("_claude_select_allocation failed: %s", exc)
+        return None
+
+
 # ── MasterAllocationAgent ─────────────────────────────────────────────────
 
 class MasterAllocationAgent:
@@ -317,6 +382,8 @@ class MasterAllocationAgent:
         event_lat: float,
         event_lon: float,
         resource_list: list[str],
+        claude=None,
+        feedback_ctx: str = "",
     ) -> MultiHubAllocation:
         need = calculate(event_type, severity, affected_population)
 
@@ -328,6 +395,17 @@ class MasterAllocationAgent:
                 bids.append(bid)
 
         bids.sort(key=lambda b: b.score, reverse=True)
+
+        # AI hub selection: reorder bids so Claude-preferred hubs come first
+        ai_sel: Optional[dict] = None
+        if claude is not None and bids:
+            ai_sel = _claude_select_allocation(bids, event_type, severity, need, claude, feedback_ctx)
+            if ai_sel and ai_sel.get("selected_hub_names"):
+                preferred_set = set(ai_sel["selected_hub_names"])
+                bids = sorted(
+                    bids,
+                    key=lambda b: (0 if b.hub_name in preferred_set else 1, -b.score),
+                )
 
         # Greedy: select bids until we have enough supply or exhaust bids
         remaining: dict[str, int] = {
@@ -381,6 +459,8 @@ class MasterAllocationAgent:
             primary_eta_min=primary.eta_minutes,
             transport_mode=primary.transport,
             resources=resource_list,
+            allocation_reasoning=ai_sel.get("reasoning", "") if ai_sel else "",
+            allocation_concerns=ai_sel.get("concerns", "") if ai_sel else "",
         )
 
 

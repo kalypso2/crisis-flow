@@ -8,7 +8,7 @@ enters the event queue. Every agent reads from and writes to this object.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 import uuid
 
 
@@ -42,6 +42,7 @@ class CrisisEvent:
     action_summary: str = ""
     consensus_flag: str = ""  # "" | LOW_CONFIDENCE | FALLBACK_USED
     allocation: dict[str, Any] = field(default_factory=dict)
+    agent_reasoning: dict[str, Any] = field(default_factory=dict)
 
     # ── Raw payload ───────────────────────────────────────────────────────
     raw: dict[str, Any] = field(default_factory=dict)
@@ -64,6 +65,7 @@ class CrisisEvent:
             "action_summary": self.action_summary,
             "consensus_flag": self.consensus_flag,
             "allocation": self.allocation,
+            "agent_reasoning": self.agent_reasoning,
         }
 
 
@@ -74,6 +76,8 @@ class AgentResult:
     """Base class for all agent outputs."""
     reason: str
     agent_name: str
+    confidence: float = 1.0     # 0.0–1.0 certainty estimate
+    reasoning: str = ""         # AI-generated justification (empty for rule-only agents)
 
 @dataclass
 class DetectionResult(AgentResult):
@@ -111,3 +115,31 @@ class CommunicationResult(AgentResult):
     arc_dest: tuple[float, float] = (0.0, 0.0)
     # Multi-arc data for globe (one per contributing hub)
     arcs: list[dict] = field(default_factory=list)
+    citizen_alert: str = ""         # AI-generated public-facing alert
+    operational_summary: str = ""   # AI-generated coordinator brief
+
+@dataclass
+class CoordinatorResult(AgentResult):
+    final_recommendation: str = "proceed"   # proceed | escalate | downgrade
+    severity_override: Optional[int] = None
+    inconsistency_detected: bool = False
+
+@dataclass
+class DebateResult(AgentResult):
+    winning_position: str = "A"   # A | B | synthesis
+    winning_score: int = 0
+    debate_summary: str = ""
+
+@dataclass
+class ReflectionResult(AgentResult):
+    assessment: str = ""    # appropriate | under-resourced | over-resourced
+    concerns: str = ""
+    suggestions: str = ""
+
+@dataclass
+class SimulationResult(AgentResult):
+    projected_severity: int = 0
+    projected_affected_population: int = 0
+    additional_resources: list[str] = field(default_factory=list)
+    pre_position_hubs: list[str] = field(default_factory=list)
+    early_warning: str = ""

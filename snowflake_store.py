@@ -61,6 +61,33 @@ def _get_conn() -> snowflake.connector.SnowflakeConnection:
 
 # ── One-time schema migration ─────────────────────────────────────────────
 
+def ensure_ai_columns() -> None:
+    """
+    Add agent_reasoning (VARIANT), citizen_alert (TEXT), and
+    operational_summary (TEXT) to all event tables if they don't exist.
+    Safe to call on every startup.
+    """
+    new_cols = [
+        ("AGENT_REASONING",    "VARIANT"),
+        ("CITIZEN_ALERT",      "TEXT"),
+        ("OPERATIONAL_SUMMARY","TEXT"),
+        ("ARCS",               "VARIANT"),
+    ]
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        for table in ALL_TABLES:
+            for col, col_type in new_cols:
+                try:
+                    cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_type}")
+                    conn.commit()
+                except Exception:
+                    pass  # column already exists or table not yet created
+        log.info("AI columns ensured on all event tables")
+    except Exception as exc:
+        log.warning("ensure_ai_columns: skipped (%s)", exc)
+
+
 def drop_confidence_column() -> None:
     """
     Drop the CONFIDENCE column from all event tables if it still exists.
@@ -125,12 +152,14 @@ WHEN NOT MATCHED THEN INSERT (
     id, source, title, lat, lon, radius_km, location_name,
     severity, affected_population, timestamp, status,
     action_summary, consensus_flag, domain_tags, allocation,
-    globe_color, arc_source, arc_dest, raw
+    globe_color, arc_source, arc_dest, raw,
+    agent_reasoning, citizen_alert, operational_summary, arcs
 ) VALUES (
     %s, %s, %s, %s, %s, %s, %s,
     %s, %s, %s, %s,
     %s, %s, PARSE_JSON(%s), PARSE_JSON(%s),
-    %s, PARSE_JSON(%s), PARSE_JSON(%s), PARSE_JSON(%s)
+    %s, PARSE_JSON(%s), PARSE_JSON(%s), PARSE_JSON(%s),
+    PARSE_JSON(%s), %s, %s, PARSE_JSON(%s)
 )
 """
 
@@ -158,6 +187,10 @@ def _base_params(ev: dict[str, Any]) -> tuple:
         json.dumps(ev.get("arc_source", [0, 0])),
         json.dumps(ev.get("arc_dest", [0, 0])),
         json.dumps(ev.get("raw", {})),
+        json.dumps(ev.get("agent_reasoning", {})),
+        ev.get("citizen_alert", "") or "",
+        ev.get("operational_summary", "") or "",
+        json.dumps(ev.get("arcs", [])),
     )
 
 

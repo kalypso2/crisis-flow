@@ -12,6 +12,7 @@ Pipeline order:
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from datetime import datetime, timezone
@@ -45,24 +46,12 @@ class DetectionAgent:
 
     Accept criteria (ALL must pass):
       1. event.severity >= 2
-      2. Not a known false-positive pattern (Twitter noise filter)
-      3. lat/lon are non-zero OR source is authoritative
-
-    For Twitter events an extra keyword-density check runs:
-      - If the tweet contains a keyword but the surrounding context is clearly
-        historical ("last year's bombing", "anniversary of the airstrike") it
-        is rejected with reason "historical_reference".
+      2. lat/lon are non-zero OR source is authoritative
 
     Emits: DetectionResult(accepted, reason)
     """
 
-    HISTORICAL_MARKERS = [
-        "anniversary", "years ago", "last year", "in 1", "in 2",
-        "history of", "historical", "documentary", "film", "movie",
-        "book about", "novel", "remember when",
-    ]
-
-    def run(self, event: CrisisEvent) -> DetectionResult:
+    def run(self, event: CrisisEvent, claude=None) -> DetectionResult:
         # ── Rule 1: minimum severity ──────────────────────────────────────
         if event.severity < 2:
             return DetectionResult(
@@ -80,22 +69,59 @@ class DetectionAgent:
                     reason="no location data and source is not authoritative",
                 )
 
-        # ── Rule 3: Twitter noise filter ──────────────────────────────────
-        if event.source == "twitter":
-            text = event.raw.get("text", "").lower()
-            for marker in self.HISTORICAL_MARKERS:
-                if marker in text:
-                    return DetectionResult(
-                        agent_name="detection",
-                        accepted=False,
-                        reason=f"twitter event rejected: historical_reference marker '{marker}'",
-                    )
-
-        return DetectionResult(
+        result = DetectionResult(
             agent_name="detection",
             accepted=True,
             reason="passed all detection checks",
         )
+
+        if claude is not None:
+            result = self._ai_enrich(event, result, claude)
+
+        return result
+
+    def _ai_enrich(self, event: CrisisEvent, result: DetectionResult, claude) -> DetectionResult:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        prompt = f"""You are a crisis actionability analyst for an emergency response system.
+Today's date is {today}.
+
+Event: {event.title}
+Type: {event.type}
+Source: {event.source}
+Location: {event.location_name or f"({event.lat:.2f}, {event.lon:.2f})"}
+Severity: {event.severity}/5
+Affected population: {event.affected_population:,}
+Timestamp: {event.timestamp.isoformat()}
+
+Should emergency resources be mobilized for this event?
+Is it actionable (active, ongoing, urgent) or potentially stale, duplicate, or irrelevant?
+
+Return ONLY valid JSON, no markdown:
+{{"actionable": <bool>, "confidence": <float 0.0-1.0>, "reasoning": "<1-2 sentences>"}}"""
+
+        try:
+            raw = claude.call(prompt, use_cache=True)
+            raw = raw.strip()
+            if raw.startswith("```"):
+                raw = "\n".join(raw.split("\n")[1:])
+                raw = raw.rstrip("` \n")
+            data = json.loads(raw)
+
+            actionable = bool(data.get("actionable", True))
+            confidence = float(data.get("confidence", 0.8))
+            reasoning = str(data.get("reasoning", ""))
+
+            result.reasoning = reasoning
+            result.confidence = confidence
+
+            if not actionable and confidence >= 0.9:
+                result.accepted = False
+                result.reason = f"AI flagged as not actionable (confidence={confidence:.2f}): {reasoning}"
+
+        except Exception as exc:
+            log.warning("Claude detection enrichment failed: %s", exc)
+
+        return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -112,7 +138,6 @@ class ClassificationAgent:
       GDACS  → reads eventtype field (EQ/FL/TC/VO/WF/DR)
       EONET  → reads categories[0].id
       ACLED  → maps event_type string
-      Twitter → classifies by which keyword cluster matched
 
     Domain tags enrich the event for the allocation agent:
       earthquake  → ["seismic", "infrastructure_risk", "aftershock_risk"]
@@ -153,7 +178,12 @@ class ClassificationAgent:
         "iceberg":    ["maritime_hazard"],
     }
 
-    def run(self, event: CrisisEvent) -> ClassificationResult:
+    VALID_TYPES = frozenset({
+        "earthquake", "flood", "cyclone", "volcano", "wildfire",
+        "drought", "storm", "conflict", "iceberg", "unknown",
+    })
+
+    def run(self, event: CrisisEvent, claude=None) -> ClassificationResult:
         ev_type = event.type  # may already be set by adapter
         tags = self.DOMAIN_TAGS.get(ev_type, [])
         reason = f"type '{ev_type}' carried from adapter"
@@ -174,23 +204,69 @@ class ClassificationAgent:
                 tags = ["civilian_risk", "infrastructure_risk"]
             reason = f"acled sub_event_type '{sub}' classified as conflict"
 
-        # ── Refine Twitter by keyword cluster ────────────────────────────
-        if event.source == "twitter":
-            text = event.raw.get("text", "").lower()
-            if "drone" in text or "airstrike" in text or "air strike" in text:
-                tags = ["civilian_risk", "aerial_strike", "humanitarian_corridor"]
-            elif "shell" in text or "mortar" in text or "artillery" in text:
-                tags = ["civilian_risk", "ground_conflict"]
-            else:
-                tags = ["civilian_risk", "humanitarian_corridor"]
-            reason = "twitter keyword cluster classification"
-
-        return ClassificationResult(
+        result = ClassificationResult(
             agent_name="classification",
             event_type=ev_type,
-            domain_tags=tags,
+            domain_tags=list(tags),
             reason=reason,
         )
+
+        if claude is not None:
+            result = self._ai_enrich(event, ev_type, result, claude)
+
+        return result
+
+    def _ai_enrich(self, event: CrisisEvent, ev_type: str, result: ClassificationResult, claude) -> ClassificationResult:
+        existing_tags = ", ".join(result.domain_tags) if result.domain_tags else "none"
+        prompt = f"""You are a disaster classification specialist for a global crisis response system.
+
+Event: {event.title}
+Source: {event.source}
+Location: {event.location_name or f"({event.lat:.2f}, {event.lon:.2f})"}
+Severity: {event.severity}/5
+Affected population: {event.affected_population:,}
+Rule-based type: {ev_type}
+Rule-based tags: {existing_tags}
+
+Validate the type and suggest all applicable domain tags beyond the standard set.
+Consider: location-specific factors, compound effects, affected infrastructure types,
+secondary hazards, and humanitarian access constraints.
+
+Return ONLY valid JSON, no markdown:
+{{"event_type": "<type>", "domain_tags": ["<tag1>", ...], "confidence": <float 0.0-1.0>, "reasoning": "<1-2 sentences>"}}"""
+
+        try:
+            raw = claude.call(prompt, use_cache=True)
+            raw = raw.strip()
+            if raw.startswith("```"):
+                raw = "\n".join(raw.split("\n")[1:])
+                raw = raw.rstrip("` \n")
+            data = json.loads(raw)
+
+            ai_type = str(data.get("event_type", ev_type)).lower()
+            ai_tags = [str(t) for t in data.get("domain_tags", [])]
+            confidence = float(data.get("confidence", 0.8))
+            reasoning = str(data.get("reasoning", ""))
+
+            result.confidence = confidence
+            result.reasoning = reasoning
+
+            # Merge tags: rule-based first, then AI additions
+            merged = list(result.domain_tags)
+            for tag in ai_tags:
+                if tag not in merged:
+                    merged.append(tag)
+            result.domain_tags = merged
+
+            # Only update type if AI is confident and type is valid
+            if confidence >= 0.8 and ai_type in self.VALID_TYPES:
+                result.event_type = ai_type
+                result.reason = f"{result.reason} | [AI type={ai_type} confidence={confidence:.2f}]"
+
+        except Exception as exc:
+            log.warning("Claude classification enrichment failed: %s", exc)
+
+        return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -222,16 +298,13 @@ class SeverityAgent:
       Conflict (ACLED fatalities):
         0→2 | 1–10→3 | 11–50→4 | 50+→5
 
-      Twitter conflict:
-        1 keyword match→2 | 2 matches→3 | 3+ matches→3 | geo-verified +1
-
       Population bonus:
         affected_population > 100,000 → +1 (capped at 5)
 
     Emits: SeverityResult(score, raw_score, reason)
     """
 
-    def run(self, event: CrisisEvent, classification: ClassificationResult) -> SeverityResult:
+    def run(self, event: CrisisEvent, classification: ClassificationResult, claude=None, feedback_ctx: str = "") -> SeverityResult:
         ev_type = classification.event_type
         raw = event.raw
         score = event.severity  # adapter's initial estimate
@@ -272,16 +345,6 @@ class SeverityAgent:
             else:                      score = 5
             reason_parts.append(f"acled fatalities={fatalities} score={score}")
 
-        elif event.source == "twitter":
-            from adapters import CONFLICT_KEYWORDS
-            text = raw.get("text", "").lower()
-            matched = sum(1 for kw in CONFLICT_KEYWORDS if kw in text)
-            score = min(3, 2 + matched // 2)
-            has_geo = bool(raw.get("geo"))
-            if has_geo:
-                score = min(5, score + 1)
-            reason_parts.append(f"twitter keywords_matched={matched} geo={has_geo} score={score}")
-
         # Population bonus
         pop_bonus = 0
         if event.affected_population > 100_000:
@@ -290,12 +353,58 @@ class SeverityAgent:
             reason_parts.append(f"pop_bonus={pop_bonus} affected={event.affected_population:,}")
 
         raw_score = float(score)
-        return SeverityResult(
+        result = SeverityResult(
             agent_name="severity",
             score=score,
             raw_score=raw_score,
             reason=" | ".join(reason_parts),
         )
+
+        if claude is not None:
+            result = self._ai_enrich(event, ev_type, score, result, claude, feedback_ctx)
+
+        return result
+
+    def _ai_enrich(self, event: CrisisEvent, ev_type: str, rule_score: int, result: SeverityResult, claude, feedback_ctx: str = "") -> SeverityResult:
+        feedback_section = f"\n{feedback_ctx}\n" if feedback_ctx else ""
+        prompt = f"""You are a crisis severity analyst for a global disaster response system.
+A rule-based system scored this event {rule_score}/5. Validate and refine if needed.
+
+Event: {event.title}
+Type: {ev_type}
+Location: {event.location_name or f"({event.lat:.2f}, {event.lon:.2f})"}
+Affected population: {event.affected_population:,}
+Rule-based reasoning: {result.reason}
+{feedback_section}
+Consider: urban vs rural context, population density, infrastructure vulnerability, regional disaster history.
+
+Return ONLY valid JSON, no markdown:
+{{"score": <int 1-5>, "confidence": <float 0.0-1.0>, "reasoning": "<2 sentences>"}}"""
+
+        try:
+            raw = claude.call(prompt, use_cache=True)
+            raw = raw.strip()
+            if raw.startswith("```"):
+                raw = "\n".join(raw.split("\n")[1:])
+                raw = raw.rstrip("` \n")
+            data = json.loads(raw)
+
+            ai_score = int(data.get("score", rule_score))
+            confidence = float(data.get("confidence", 0.8))
+            reasoning = str(data.get("reasoning", ""))
+
+            result.reasoning = reasoning
+            result.confidence = confidence
+
+            # Only adopt AI score if high-confidence and within 1 point of rule score
+            if confidence >= 0.75 and abs(ai_score - rule_score) <= 1:
+                result.score = ai_score
+                result.reason = f"{result.reason} | [AI confidence={confidence:.2f}]"
+
+        except Exception as exc:
+            log.warning("Claude severity enrichment failed: %s", exc)
+
+        return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -392,7 +501,7 @@ class AllocationAgent:
     def __init__(self):
         self._master = _MasterAllocAgent()
 
-    def run(self, event: CrisisEvent, severity: SeverityResult) -> AllocationResult:
+    def run(self, event: CrisisEvent, severity: SeverityResult, claude=None, feedback_ctx: str = "") -> AllocationResult:
         ev_type = event.type
         score   = severity.score
 
@@ -407,6 +516,8 @@ class AllocationAgent:
             event_lat=event.lat,
             event_lon=event.lon,
             resource_list=resources,
+            claude=claude,
+            feedback_ctx=feedback_ctx,
         )
 
         return AllocationResult(
@@ -427,6 +538,8 @@ class AllocationAgent:
                 f"eta={allocation.primary_eta_min}min "
                 f"transport={allocation.transport_mode}"
             ),
+            reasoning=allocation.allocation_reasoning,
+            confidence=0.9 if allocation.allocation_reasoning else 1.0,
         )
 
 
@@ -474,6 +587,7 @@ class CommunicationAgent:
         severity: SeverityResult,
         allocation: AllocationResult,
         consensus_flag: str,
+        claude=None,
     ) -> CommunicationResult:
 
         sev_label = SEVERITY_LABELS.get(severity.score, "UNKNOWN")
@@ -519,7 +633,7 @@ class CommunicationAgent:
                 "eta_minutes": allocation.eta_minutes,
             }]
 
-        return CommunicationResult(
+        result = CommunicationResult(
             agent_name="communication",
             summary=summary,
             globe_color=TYPE_COLORS.get(classification.event_type, "#888780"),
@@ -528,3 +642,57 @@ class CommunicationAgent:
             arcs=arcs,
             reason="communication summary generated",
         )
+
+        if claude is not None:
+            result = self._ai_enrich(event, classification, severity, allocation, result, claude)
+
+        return result
+
+    def _ai_enrich(
+        self,
+        event: CrisisEvent,
+        classification: ClassificationResult,
+        severity: SeverityResult,
+        allocation: AllocationResult,
+        result: CommunicationResult,
+        claude,
+    ) -> CommunicationResult:
+        sev_label = SEVERITY_LABELS.get(severity.score, "UNKNOWN")
+        resources_str = ", ".join(allocation.resources)
+        hours, mins = divmod(allocation.eta_minutes, 60)
+        eta_str = f"{hours}h {mins}m" if hours else f"{mins}m"
+
+        prompt = f"""You are the communications officer for a global humanitarian crisis response system.
+
+=== CRISIS EVENT ===
+Title: {event.title}
+Type: {classification.event_type.upper()} — Severity {severity.score}/5 ({sev_label})
+Location: {event.location_name or f"({event.lat:.2f}, {event.lon:.2f})"}
+Affected population: {event.affected_population:,}
+Resources deploying: {resources_str}
+Primary hub: {allocation.depot_name} — ETA {eta_str}
+Source: {event.source.upper()}
+
+Generate two communications:
+1. citizen_alert: A SHORT, plain-language alert for the affected public. Max 2 sentences. Direct and clear.
+2. operational_summary: A detailed internal brief for response coordinators. Include event context, resources being deployed, logistics, and any key concerns.
+
+Return ONLY valid JSON, no markdown:
+{{"citizen_alert": "<2 sentences max>", "operational_summary": "<detailed brief>", "tone": "emergency" or "advisory"}}"""
+
+        try:
+            raw = claude.call(prompt, use_cache=True)
+            raw = raw.strip()
+            if raw.startswith("```"):
+                raw = "\n".join(raw.split("\n")[1:])
+                raw = raw.rstrip("` \n")
+            data = json.loads(raw)
+
+            result.citizen_alert = str(data.get("citizen_alert", ""))
+            result.operational_summary = str(data.get("operational_summary", ""))
+            result.reasoning = f"tone={data.get('tone', 'advisory')}"
+
+        except Exception as exc:
+            log.warning("Claude communication enrichment failed: %s", exc)
+
+        return result

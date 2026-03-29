@@ -1,172 +1,345 @@
-# CrisisFlow — Autonomous Disaster Response System
+# CrisisFlow — Autonomous AI Disaster Response System
 
-A multi-agent pipeline that ingests **live** crisis signals (earthquakes, weather, GDACS, conflict, social), normalizes them into a shared schema, runs **detection → classification → severity → allocation → communication**, applies a **consensus** layer with circuit breakers, persists to **Snowflake**, deducts **UNHRD-style depot stock**, and serves a **React + Vite** dashboard with a **3D globe**, **week timeline**, and **aid distribution simulation**.
-
----
-
-## Repository layout
-
-| Path | Role |
-|------|------|
-| `main.py` | Flask API, priority event queue, consumer thread, ingestion threads, `process_event` |
-| `adapters.py` | USGS, NOAA, GDACS, EONET, ACLED, Twitter — fetch/stream → `CrisisEvent` |
-| `agents.py` | Five agents: Detection, Classification, Severity, Allocation, Communication |
-| `hub_agents.py` | Per-hub bidding + `MasterAllocationAgent` (multi-depot greedy allocation) |
-| `consensus.py` | Disagreement resolution, authority override, substitutions, circuit breaker |
-| `schema.py` | `CrisisEvent`, agent result datatypes |
-| `snowflake_store.py` | One table per event type + `CONVOYS`; read/write for `/events` |
-| `depot_inventory.py` | In-memory UNHRD hub baselines, `commit()` deductions, replenishment |
-| `need_calculator.py` | Sphere-oriented need quantities; `scrub_aid_need_notes` for clean API payloads |
-| `distribution_engine.py` | **Pure** weekly simulation via `POST /distribute` (does not mutate live inventory) |
-| `App.jsx` | Dashboard: globe, filters, aid/detail/hub panels, distribution feed, timeline |
-| `gemini_manager.py` / `gemini_strategies.py` | Gemini key rotation and caching |
-| `timestamp_agent.py` | Optional: refine ACLED static JSON timestamps |
-| `data/` | ACLED static GeoJSON / markers (optional ingest) |
+CrisisFlow is a multi-agent AI pipeline that ingests live crisis signals from global data sources, processes them through 9 AI agents powered by Google Gemini, allocates humanitarian aid from UN depots, and serves a real-time 3D globe dashboard.
 
 ---
 
-## Data sources & ingestion
-
-Poll intervals are defined in `main.py` → `start_ingestion_threads()`. **Twitter** uses a **filtered stream** (not a poll).
-
-| Source | Interval | Notes |
-|--------|----------|--------|
-| USGS | 120 s | Earthquakes GeoJSON |
-| NOAA | 300 s | Active NWS alerts |
-| GDACS | 600 s | Global disaster list |
-| EONET | 300 s | NASA natural events |
-| ACLED | 900 s | Requires `ACLED_API_KEY` + `ACLED_EMAIL` |
-
-
----
-
-## Architecture
+## How It Works — High Level
 
 ```
-[Adapters] → _enqueue (dedup TTL + coord quarantine) → PriorityQueue (−severity, counter)
-       → consumer_thread → process_event → Snowflake + convoys
-       → GET /events, /inventory, POST /distribute, …
-
-[Browser]  →  Vite (e.g. :5173)  →  App.jsx  →  API :8000
+Live Data Sources
+  USGS · NOAA · GDACS · EONET · ACLED
+          │
+          ▼
+   Priority Queue  (severity-ordered, deduplicated)
+          │
+          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Agent Pipeline                           │
+│                                                             │
+│  1. Detection     → Is this a real, actionable crisis?      │
+│  2. Classification → What type? What tags?                  │
+│  3. Severity       → How bad is it? (1–5)                   │
+│  4. [Debate]       → Resolve disagreements in severity      │
+│  5. Allocation     → Which UN hubs send what aid?           │
+│  6. Consensus      → Are all agents in agreement?           │
+│  7. Coordinator    → Final coherent decision review         │
+│  8. Communication  → Generate public + operational alerts   │
+│  9. Reflection     → Was the response appropriate?          │
+│ 10. Simulation     → What if this escalates?               │
+└─────────────────────────────────────────────────────────────┘
+          │
+          ▼
+   Snowflake Storage  +  SSE Stream  →  React Dashboard
 ```
 
-- **Queue ordering:** Higher `severity` first; monotonic counter breaks ties.
-- **Quarantine:** Non-finite lat/lon, out-of-range, or `(0,0)` placeholders are rejected (logged).
-- **Dedup:** Same `event.id` within `DEDUP_TTL` (~10 min) is dropped.
+Every agent runs with a **45-second timeout** and degrades gracefully — if Gemini is unavailable or an agent fails, the rule-based result is preserved and the pipeline continues.
 
 ---
 
-## `CrisisEvent` (`schema.py`)
+## Data Sources
 
-Fields include: `id`, `source`, `type`, `domain_tags`, `lat`, `lon`, `radius_km`, `location_name`, `severity`, `affected_population`, `timestamp`, `status`, `title`, `action_summary`, `consensus_flag`, `allocation`, `raw`.
+| Source | Poll Interval | What It Provides |
+|--------|--------------|------------------|
+| **USGS** | 120 s | Earthquakes — magnitude, PAGER alert level |
+| **NOAA** | 300 s | Active NWS weather alerts — hurricanes, tornadoes, floods |
+| **GDACS** | 600 s | Global Disaster Alert — cyclones, volcanoes, droughts |
+| **EONET** | 300 s | NASA natural events — wildfires, icebergs, sea/lake ice |
+| **ACLED** | 900 s | Armed conflict events (requires API key) |
 
-Processed API payloads may add: `globe_color`, `arc_source`, `arc_dest`, `arcs` (multi-hub legs for legacy pipeline arcs; the UI globe **simulation arcs** come from `POST /distribute` feed in `App.jsx`).
-
----
-
-## Agent pipeline (`process_event` in `main.py`)
-
-Each stage uses `_run_with_timeout` (**`AGENT_TIMEOUT`**, default **5 s**).
-
-1. **Detection** — Requires `severity >= 2`; valid location unless source is authoritative with special rules; Twitter **historical-reference** filter. `DetectionResult(accepted, reason)`.
-2. **Classification** — Maps source categories to canonical `type` + `domain_tags`. `ClassificationResult`.
-3. **Severity** — Source-specific rules on `raw` (USGS mag/PAGER, NOAA, GDACS, ACLED fatalities, Twitter keywords/geo); optional `affected_population` bonus. `SeverityResult`.
-4. **Allocation** — `MasterAllocationAgent` solicits bids from UNHRD hubs, fills `need_calculator.calculate` output, **`depot_inventory.commit`**, returns convoys. `AllocationResult`.
-5. **Communication** — Human-readable summary + globe hints. `CommunicationResult`.
-
-If detection rejects the event, `process_event` returns `None` and nothing is broadcast.
+All sources are normalized into a shared `CrisisEvent` schema before entering the pipeline. Events with placeholder coordinates `(0, 0)` or invalid lat/lon are **quarantined** and never processed.
 
 ---
 
-## Consensus (`consensus.py`)
+## The 9 Agents
 
-Runs after all agents; `None` results become cache hits or safe defaults.
+### 1. Detection Agent
+**File:** [agents.py](agents.py) · **Role:** Gatekeeper
 
-| Outcome | When | Effect |
-|---------|------|--------|
-| Agreement | `|adapter_sev − agent_sev| ≤ 1` and types align | `consensus_flag` empty |
-| Soft | Spread > 1 **or** classification type ≠ adapter type | `LOW_CONFIDENCE`; average severity; majority type; **drop last** planned resource |
-| Hard | Failed agents / substitution / **authority override** | `FALLBACK_USED`; same averaging + reduction |
+Decides whether an event is worth acting on. First applies two hard rules:
+- Severity must be ≥ 2
+- Must have valid coordinates (unless from an authoritative source)
 
-**Authority override:** USGS PAGER orange/red, NOAA Extreme, or GDACS red can force severity **≥ 4**.
+Then asks Gemini: *"Is this event actionable — active, urgent, and relevant — or is it stale, duplicate, or irrelevant?"*
 
-**Circuit breaker:** Three failures in 60 s → agent **DEGRADED** for 300 s; `main.py` skips degraded agents. **`GET /health`** exposes per-agent status.
+Only overrides to rejected if Gemini confidence ≥ 0.90. This prevents high-severity alerts from being dropped on marginal AI calls.
 
----
-
-## Live inventory vs week simulation
-
-| Mechanism | Mutates `depot_inventory` | Purpose |
-|-----------|---------------------------|---------|
-| Pipeline allocation | Yes | Real-time commits when events process |
-| `simulate_week` (`distribution_engine.py`) | **No** | Resets from baselines; powers UI bars, feed, staggered globe arcs |
+**Output:** `accepted: bool`, `confidence`, `reasoning`
 
 ---
 
-## HTTP API (Flask, default **8000**)
+### 2. Classification Agent
+**File:** [agents.py](agents.py) · **Role:** Categorizer
+
+Assigns a canonical event type and domain tags using source-specific rules:
+- USGS → always `earthquake`
+- NOAA → maps NWS event strings (e.g. "Hurricane Warning" → `cyclone`)
+- GDACS → reads `eventtype` field
+- EONET → reads `categories[0].id`
+
+Then asks Gemini to validate the type and suggest additional tags based on location context, compound effects, and secondary hazards. Tags from both rule-based and AI sources are merged (union).
+
+**Event types:** `earthquake · flood · cyclone · volcano · wildfire · drought · storm · conflict · iceberg`
+
+**Output:** `event_type`, `domain_tags`, `confidence`, `reasoning`
+
+---
+
+### 3. Severity Agent
+**File:** [agents.py](agents.py) · **Role:** Risk Scorer
+
+Produces a 1–5 severity score using source-specific rules:
+
+| Source | Rule |
+|--------|------|
+| USGS | Magnitude: 4.x→2, 5.x→3, 6.x→4, 7+→5; PAGER orange +1, red +2 |
+| NOAA | Severity string: Minor→1 · Moderate→2 · Severe→3 · Extreme→4; Immediate urgency +1 |
+| GDACS | Alert level: green→2 · orange→3 · red→4 |
+| ACLED | Fatalities: 0→2 · 1–10→3 · 11–50→4 · 50+→5 |
+| All | Affected population > 100,000 → +1 bonus (capped at 5) |
+
+Gemini then validates the rule score considering urban/rural context, population density, and infrastructure vulnerability. AI score is only adopted if confidence ≥ 0.75 and within 1 point of the rule score.
+
+**Output:** `score (1–5)`, `confidence`, `reasoning`
+
+---
+
+### 4. Debate Agent *(conditional)*
+**File:** [coordinator.py](coordinator.py) · **Role:** Arbiter
+
+Only fires when the adapter's initial severity estimate and the Severity Agent's score **diverge by 2 or more points**. Presents both positions to Gemini as a structured debate and returns a winning score with justification. Can synthesize both positions if neither is clearly correct.
+
+**Triggers:** `|adapter_severity - agent_severity| ≥ 2`
+
+**Output:** `winning_score`, `winning_position (A/B/synthesis)`, `debate_summary`
+
+---
+
+### 5. Allocation Agent
+**File:** [agents.py](agents.py) + [hub_agents.py](hub_agents.py) · **Role:** Aid Dispatcher
+
+Orchestrates resource allocation from 6 real UN humanitarian depots (UNHRD network):
+
+| Hub | Location | Org | Specializations |
+|-----|----------|-----|-----------------|
+| Brindisi UNHRD | Italy | UNHRD/WFP | Earthquake, Flood, Conflict |
+| Dubai UNHRD | UAE | UNHRD/OCHA | Conflict, Drought, Flood |
+| Accra UNHRD | Ghana | UNHRD/WFP | Conflict, Drought, Flood |
+| Kuala Lumpur UNHRD | Malaysia | UNHRD/OCHA | Cyclone, Flood, Earthquake |
+| Panama City UNHRD | Panama | UNHRD/WFP | Cyclone, Flood, Earthquake |
+| Las Palmas UNHRD | Spain | UNHRD/WFP | Flood, Drought, Conflict |
+
+**How it works:**
+1. Calculates aid need based on event type, severity, and affected population
+2. Each `HubAgent` checks its live inventory and bids on what it can contribute
+3. Gemini receives all hub proposals and selects the optimal combination
+4. A greedy selection fills remaining need from the Gemini-preferred ordering
+5. Inventory is committed (deducted from live depot stock)
+6. Returns a full convoy manifest with per-hub contributions and ETAs
+
+Transport mode is selected by distance: air (<3,000 km), sea (>3,000 km), or land (same continent).
+
+**Output:** `resources`, `eta_minutes`, `depot_name`, `convoys[]`, `need`, `allocation_reasoning`
+
+---
+
+### 6. Consensus Engine
+**File:** [consensus.py](consensus.py) · **Role:** Integrity Checker
+
+Runs after the first 5 agents to detect and resolve disagreements before the Coordinator sees results.
+
+| Outcome | Trigger | Action |
+|---------|---------|--------|
+| **Agreement** | Severity spread ≤ 1 and types match | `consensus_flag` = empty, proceed |
+| **Soft disagreement** | Spread > 1 or classification type ≠ adapter type | Average severity, majority-vote type, drop last resource, flag = `LOW_CONFIDENCE` |
+| **Hard failure** | Agent timed out, crashed, or authority override triggered | Substitute from cache or safe defaults, flag = `FALLBACK_USED` |
+
+**Authority override:** USGS PAGER red/orange, NOAA Extreme, or GDACS red forces severity ≥ 4 regardless of agent scores.
+
+**Circuit breaker:** 3 failures within 60 seconds → agent marked DEGRADED for 5 minutes. Degraded agents are skipped entirely. Status visible at `GET /health`.
+
+---
+
+### 7. Coordinator Agent
+**File:** [coordinator.py](coordinator.py) · **Role:** Final Decision Reviewer
+
+Reviews all upstream agent results holistically and makes a final coherent call. Checks for internal inconsistencies (e.g. severity 5 earthquake with minimal resources), and can override the severity score if it's clearly wrong.
+
+**Output:** `final_recommendation (proceed/escalate/downgrade)`, `severity_override`, `inconsistency_detected`, `reasoning`
+
+---
+
+### 8. Communication Agent
+**File:** [agents.py](agents.py) · **Role:** Alert Generator
+
+Builds a structured action summary and globe rendering parameters, then asks Gemini to generate two distinct communications:
+
+- **`citizen_alert`** — Max 2 sentences, plain language, for the affected public
+- **`operational_summary`** — Detailed internal brief for response coordinators: event context, resources deploying, logistics, key concerns
+
+Also produces globe visualization data: event color by type, convoy arc source/destination, and per-hub arc entries for the 3D globe.
+
+**Output:** `summary`, `citizen_alert`, `operational_summary`, `globe_color`, `arcs[]`
+
+---
+
+### 9. Reflection Agent
+**File:** [coordinator.py](coordinator.py) · **Role:** Post-Decision Critic
+
+After the full response has been decided, Reflection reviews everything critically and asks: *"Was this response appropriate? Were we under- or over-resourced? What would we do differently?"*
+
+This is a self-assessment layer — it doesn't change anything but surfaces concerns and improvement suggestions for operators reviewing the response.
+
+**Output:** `assessment (appropriate/under-resourced/over-resourced)`, `concerns`, `suggestions`, `reasoning`
+
+---
+
+### 10. Simulation Agent
+**File:** [coordinator.py](coordinator.py) · **Role:** Escalation Projector
+
+Projects what happens if the disaster escalates to the next severity level (`current + 1`, capped at 5). Estimates:
+- Projected affected population
+- Additional resources that would be needed
+- Which hubs should pre-position supplies now as a precaution
+- An actionable early warning message
+
+**Output:** `projected_severity`, `projected_affected_population`, `additional_resources[]`, `pre_position_hubs[]`, `early_warning`
+
+---
+
+## Pipeline Flow in Detail
+
+```
+Event enters queue
+       │
+       ├─ [Detection] ──── rejected? → drop event (logged)
+       │
+       ├─ [Classification] ──── event_type + domain_tags
+       │
+       ├─ [Severity] ──── score 1–5
+       │       │
+       │       └─ spread ≥ 2? → [Debate] → winning_score overrides
+       │
+       ├─ [Allocation] ──── hub bids → Gemini selection → convoy manifest
+       │
+       ├─ [Consensus] ──── agreement / soft / hard resolution
+       │
+       ├─ [Coordinator] ──── final review, optional severity_override
+       │
+       ├─ [Communication] ──── citizen_alert + operational_summary + globe data
+       │
+       ├─ [Reflection] ──── post-decision critique
+       │
+       └─ [Simulation] ──── escalation projection
+              │
+              ▼
+        event.agent_reasoning = {all 9 agents}
+              │
+              ▼
+       Snowflake storage + SSE broadcast → dashboard
+```
+
+---
+
+## AI Integration
+
+**Model:** `gemini-2.5-flash` (Google Gemini)
+
+**File:** [claude_manager.py](claude_manager.py)
+
+All agents use a single `ClaudeManager` wrapper with `.call(prompt)` interface. The wrapper includes:
+- **MD5-keyed disk cache** at `data/cached_responses/` — identical prompts are never re-billed
+- Graceful error handling — any Gemini failure returns the rule-based result unchanged
+
+**Cost estimate:** ~$0.0007 per event processed (~$0.04–$1.00/day at normal volumes)
+
+**Required:** `GOOGLE_API_KEY` in `.env`
+
+---
+
+## API Endpoints (port 8000)
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Queue depth, processed count, agent OK/DEGRADED |
-| GET | `/events` | Snowflake union by `TYPE_TO_TABLE`, deduped by `(title, date)`; fallback in-memory buffer; notes scrubbed |
-| GET | `/stream` | SSE: heartbeats + new processed events as JSON |
-| GET | `/inventory` | Hub stock, baselines, `stock_level` |
-| POST | `/distribute` | Body: JSON array of events → `{ committed, need, feed, events_served, events_unmet }` |
-| GET | `/quarantine` | Quarantined ingest rows |
-| GET | `/acled-static` | Conflicts from Snowflake or `data/*.json` fallback |
-| GET | `/convoys` | Recent convoy rows |
-| GET | `/snowflake/summary` | Row counts per table |
-| GET | `/snowflake/<event_type>` | e.g. `earthquake`, `conflict` (special params) |
+| `GET` | `/events` | All processed events from Snowflake (with AI reasoning fields) |
+| `GET` | `/stream` | SSE stream — new events pushed in real time |
+| `GET` | `/health` | Agent status, circuit breaker state, queue depth |
+| `GET` | `/inventory` | Live UNHRD hub stock levels vs baselines |
+| `POST` | `/distribute` | Run a week-long aid simulation on a set of events |
+| `GET` | `/convoys` | Recent convoy dispatch records |
+| `GET` | `/quarantine` | Events rejected at ingestion |
+| `GET` | `/acled-static` | Conflict zones from Snowflake |
+| `GET` | `/snowflake/summary` | Row counts per event table |
+| `GET` | `/snowflake/<type>` | e.g. `/snowflake/earthquake` |
+
+**Event response fields include:**
+- Standard: `id`, `source`, `type`, `severity`, `lat`, `lon`, `title`, `timestamp`, `affected_population`
+- AI-generated: `citizen_alert`, `operational_summary`, `action_summary`
+- Agent reasoning: `agent_reasoning` — object with keys for each agent that ran
+- Globe: `globe_color`, `arc_source`, `arc_dest`, `arcs[]`
+- Allocation: `allocation.resources[]`, `allocation.eta_minutes`, `allocation.convoys[]`
 
 ---
 
-## Snowflake (`.env`)
+## Setup
 
-Typical variables (`snowflake_store.py`): `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`, optional `SNOWFLAKE_DATABASE` (default `CRISISFLOW`), `SNOWFLAKE_SCHEMA`, `SNOWFLAKE_WAREHOUSE`.
+### Backend
 
-On startup, `main.py` calls `drop_confidence_column()` and `ensure_convoys_table()`. If Snowflake is unavailable, `/events` falls back to the in-memory ring buffer.
+```bash
+# 1. Install Python dependencies
+pip install -r requirements.txt
 
----
+# 2. Configure environment
+cp .env.example .env
+# Edit .env — add GOOGLE_API_KEY, Snowflake credentials
 
-## Frontend
+# 3. Run
+python main.py
+# → http://localhost:8000
+```
+
+### Frontend
 
 ```bash
 npm install
 npm run dev
+# → http://localhost:5173
 ```
 
-Default: **http://127.0.0.1:5173**. API base: same host, port **8000**, unless **`VITE_API_ORIGIN`** is set (`App.jsx` → `apiOrigin()`).
-
-**Stack:** React 19, Vite 5, `react-globe.gl`, Three.js.
-
-**UI highlights:** Event list + type filter, stats bar, **week scrubber** (re-runs distribution), **Aid** / **Details** / **hub inventory** panels, **distribution feed** (rows open Aid for that `event_id`), hex heatmap, **simulation arcs** (staggered, filtered by event type).
+Both must be running simultaneously. The React app calls the Flask API on port 8000.
 
 ---
 
-## Backend setup
+## Environment Variables
 
-```bash
-pip install -r requirements.txt
-```
-
-Project root **`.env`** is loaded by `dotenv` in `main.py`.
-
-```bash
-python3 main.py
-```
-
-Binds **`0.0.0.0:8000`**. The module docstring may mention `pipeline/main.py`; in this repo the entry point is **`main.py`** at the root.
-
-**Python deps (excerpt):** Flask, flask-cors, requests, snowflake-connector, pandas, `google-genai` / `google-generativeai`, Pillow.
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GOOGLE_API_KEY` | Yes | Gemini API key — get one at aistudio.google.com |
+| `SNOWFLAKE_ACCOUNT` | Yes | Snowflake account identifier |
+| `SNOWFLAKE_USER` | Yes | Snowflake username |
+| `SNOWFLAKE_PASSWORD` | Yes | Snowflake password |
+| `SNOWFLAKE_DATABASE` | No | Default: `CRISISFLOW` |
+| `SNOWFLAKE_SCHEMA` | No | Default: `PUBLIC` |
+| `SNOWFLAKE_WAREHOUSE` | No | Default: `COMPUTE_WH` |
+| `ACLED_API_KEY` | No | Required for live conflict data |
+| `ACLED_EMAIL` | No | Required for live conflict data |
 
 ---
 
-## Optional: static ACLED JSON
+## Repository Layout
 
-`ingest_static_acled_once()` in `main.py` reads `data/acled_globe_markers_refined.json` (preferred) or `data/acled_globe_markers.json`. It is **not** invoked automatically in the `if __name__ == "__main__"` block—call it from a one-off script or add a startup hook if you want those rows in the queue. **`python3 timestamp_agent.py`** can build the refined file.
-
----
-
-## Package metadata
-
-`package.json` has `"name": "files"` (placeholder). The product name is **CrisisFlow**.
+| File | Role |
+|------|------|
+| [main.py](main.py) | Flask API, event queue, consumer thread, ingestion threads |
+| [agents.py](agents.py) | Detection, Classification, Severity, Allocation, Communication agents |
+| [coordinator.py](coordinator.py) | Coordinator, Debate, Reflection, Simulation agents |
+| [hub_agents.py](hub_agents.py) | Per-hub bidding + MasterAllocationAgent |
+| [consensus.py](consensus.py) | Disagreement resolution, circuit breaker, authority override |
+| [schema.py](schema.py) | CrisisEvent + all agent result dataclasses |
+| [claude_manager.py](claude_manager.py) | Gemini API wrapper with disk caching |
+| [snowflake_store.py](snowflake_store.py) | Snowflake read/write, one table per event type |
+| [depot_inventory.py](depot_inventory.py) | Live UNHRD hub inventory, commit/replenishment |
+| [need_calculator.py](need_calculator.py) | Aid quantity calculation by event type + population |
+| [distribution_engine.py](distribution_engine.py) | Week-simulation engine for `POST /distribute` |
+| [adapters.py](adapters.py) | USGS, NOAA, GDACS, EONET, ACLED — fetch + normalize |
+| [App.jsx](src/App.jsx) | React dashboard — 3D globe, filters, panels, timeline |

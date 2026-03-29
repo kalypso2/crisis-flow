@@ -1,0 +1,5 @@
+google-adk>=1.28.0
+google-genai>=1.0.0
+fastmcp>=2.0
+python-dotenv>=1.0
+snowflake-connector-python>=3.6

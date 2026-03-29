@@ -1,0 +1,28 @@
+{
+  "name": "CrisisFlow Intelligence Analyst",
+  "description": "Multi-source crisis intelligence analysis with timestamp refinement via Google Search, Snowflake Cortex enrichment, and self-correcting validation loops. Covers 996 ACLED conflict zones across 115 countries.",
+  "provider": {
+    "organization": "CrisisFlow"
+  },
+  "version": "1.0.0",
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["application/json", "text/plain"],
+  "skills": [
+    {
+      "id": "conflict-analysis",
+      "name": "Conflict Zone Analysis",
+      "description": "Analyzes ACLED conflict zones in a specified region: loads data from Snowflake via MCP, refines timestamps via parallel Google Search, validates results with a self-correction loop, enriches via Snowflake Cortex, and generates intelligence briefings.",
+      "tags": ["crisis", "conflict", "ACLED", "intelligence", "timestamp"]
+    },
+    {
+      "id": "a2a-handoff",
+      "name": "Response Coordinator Handoff",
+      "description": "Sends intelligence briefings to the Humanitarian Response Coordinator specialist agent via A2A protocol for action planning and alert generation.",
+      "tags": ["a2a", "handoff", "response", "coordinator"]
+    }
+  ]
+}

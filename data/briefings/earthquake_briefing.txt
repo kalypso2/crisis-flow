@@ -1,0 +1,92 @@
+CRISISFLOW DISASTER INTELLIGENCE BRIEFING
+==========================================
+Event Type: earthquake
+Generated: 2026-03-29 16:40:00
+
+PRIORITY EVENTS:
+- Earthquake in Russia, Location: Russia, Severity: 4 (Critical)
+  - Current Weather: Partly cloudy, 1.9°C, wind 7.9 km/h, no precipitation.
+  - Forecast Risk: Extreme. Heavy snowfall and strong winds are predicted, severely hampering rescue operations and potentially exacerbating earthquake damage.
+  - Estimated Affected Population: 0 (Note: This data may be incomplete or unavailable).
+  - Infrastructure at Risk: Not specified, but implied to be at risk due to severity and potential for aftershocks.
+  - Compound Risks: Nearby earthquake (Severity 3) 76.8 km away.
+
+- Earthquake in Afghanistan, Location: Afghanistan, Severity: 4 (Critical)
+  - Current Weather: Overcast, 9.1°C, wind 5.8 km/h, no precipitation.
+  - Forecast Risk: Extreme. Frequent thunderstorms and heavy rainfall are expected, posing a significant risk of landslides and exacerbating earthquake damage.
+  - Estimated Affected Population: 0 (Note: This data may be incomplete or unavailable).
+  - Infrastructure at Risk: Not specified.
+  - Compound Risks: Two nearby earthquakes (Severity 4) within 1.5 km, another (Severity 3) 20.8 km away. Also, two floods in Pakistan within 120 km.
+
+- Earthquake in Afghanistan, Location: Afghanistan, Severity: 4 (Critical)
+  - Current Weather: Overcast, 9.6°C, wind 5.9 km/h, no precipitation.
+  - Forecast Risk: Extreme. High probability of thunderstorms and significant rainfall, posing a severe risk of landslides and exacerbating damage.
+  - Estimated Affected Population: 0 (Note: This data may be incomplete or unavailable).
+  - Infrastructure at Risk: Not specified.
+  - Compound Risks: Two nearby earthquakes (Severity 4) within 1.5 km, another (Severity 3) 21.9 km away. Also, two floods in Pakistan within 120 km.
+
+- Earthquake in Indonesia, Location: Indonesia, Severity: 4 (Critical)
+  - Current Weather: Overcast, 30.2°C, wind 11.2 km/h, no precipitation.
+  - Forecast Risk: High. High likelihood of thunderstorms and moderate to heavy rainfall, increasing the risk of landslides and exacerbating infrastructure damage.
+  - Estimated Affected Population: 0 (Note: This data may be incomplete or unavailable).
+  - Infrastructure at Risk: Not specified.
+  - Compound Risks: None identified within the immediate vicinity.
+
+- Earthquake in China, Location: China, Severity: 4 (Critical)
+  - Current Weather: Clear sky, 6.7°C, wind 10.1 km/h, no precipitation.
+  - Forecast Risk: High. Significant risk of high winds and potential for light snow, which could complicate rescue efforts and increase structural damage risk.
+  - Estimated Affected Population: 0 (Note: This data may be incomplete or unavailable).
+  - Infrastructure at Risk: Not specified.
+  - Compound Risks: Nearby flood in Nepal (Severity 3) 234.7 km away.
+
+- Earthquake in Papua New Guinea, Location: Papua New Guinea, Severity: 3 (High)
+  - Current Weather: Partly cloudy, 28.6°C, wind 9.8 km/h, no precipitation.
+  - Forecast Risk: High. Frequent thunderstorms and heavy rainfall predicted, potentially leading to landslides and exacerbating earthquake damage.
+  - Estimated Affected Population: 0 (Note: This data may be incomplete or unavailable).
+  - Infrastructure at Risk: Not specified.
+  - Compound Risks: Two nearby earthquakes (Severity 3) within 500 km in Indonesia.
+
+- Earthquake in Türkiye, Location: Türkiye, Severity: 3 (High)
+  - Current Weather: Slight rain, 9.2°C, wind 14.5 km/h, 0.4 mm precipitation.
+  - Forecast Risk: High. Persistent moderate to heavy rainfall and strong winds are expected, posing a significant risk of exacerbating damage from landslides or flooding.
+  - Estimated Affected Population: 0 (Note: This data may be incomplete or unavailable).
+  - Infrastructure at Risk: Not specified.
+  - Compound Risks: Two nearby earthquakes (Severity 3) within 185 km.
+
+- Earthquake in Ecuador, Location: Ecuador, Severity: 3 (High)
+  - Current Weather: Overcast, 27.3°C, wind 4.9 km/h, no precipitation.
+  - Forecast Risk: Low. Overcast conditions with no significant precipitation expected, unlikely to exacerbate earthquake impact.
+  - Estimated Affected Population: 0 (Note: This data may be incomplete or unavailable).
+  - Infrastructure at Risk: Not specified.
+  - Compound Risks: None identified within the immediate vicinity.
+
+- Earthquake in Myanmar, Location: Myanmar, Severity: 4 (Critical)
+  - Current Weather: Mainly clear, 33.9°C, wind 10.9 km/h, no precipitation.
+  - Forecast Risk: Low. Generally clear to partly cloudy skies with rising temperatures. Minimal precipitation expected, suggesting no significant weather-related exacerbation.
+  - Estimated Affected Population: 0 (Note: This data may be incomplete or unavailable).
+  - Infrastructure at Risk: Not specified.
+  - Compound Risks: Nearby earthquake (Severity 3) 170.4 km away.
+
+RECOMMENDED ACTIONS:
+1.  **Prioritize Russia and Afghanistan:** Due to the "Extreme" forecast risk (heavy snow/wind in Russia, thunderstorms/heavy rain in Afghanistan), immediate attention should be given to these regions. Rescue operations may face significant challenges.
+2.  **Assess Infrastructure Vulnerability:** Critical infrastructure (hospitals, roads, power) in all affected areas should be assessed for earthquake damage and susceptibility to weather-related hazards (landslides, flooding, high winds, snow).
+3.  **Monitor Compound Risks:** Closely monitor flood events in Pakistan near the Afghanistan earthquakes and potential cascading effects.
+4.  **Preposition Resources:** Consider prepositioning search and rescue, medical, and heavy equipment in high-risk zones, especially in Russia and Afghanistan, anticipating logistical difficulties.
+5.  **Information Gathering:** Continue to seek detailed information on affected populations and infrastructure damage, as the provided 'affected_population' data is currently zero across all events.
+
+WEATHER OUTLOOK:
+The next 7 days present a mixed but concerning weather picture for the earthquake-affected regions.
+
+-   **High Risk Zones:**
+    -   **Russia:** Extreme risk of heavy snowfall and strong winds, severely impacting rescue efforts.
+    -   **Afghanistan:** Extreme risk of thunderstorms and heavy rainfall, leading to potential landslides.
+    -   **Indonesia:** High risk of thunderstorms and heavy rainfall, with potential for landslides.
+    -   **Papua New Guinea:** High risk of thunderstorms and heavy rainfall, similar concerns as Indonesia.
+    -   **Türkiye:** High risk of persistent moderate to heavy rainfall and strong winds, increasing landslide and flooding potential.
+    -   **China:** High risk of strong winds and potential for light snow, complicating operations.
+
+-   **Lower Risk Zones:**
+    -   **Myanmar:** Low risk, with mainly clear to partly cloudy skies and minimal precipitation.
+    -   **Ecuador:** Low risk, with overcast conditions and no significant precipitation expected.
+
+Overall, the forecast indicates a significant challenge for disaster response in several key regions due to severe weather conditions.

@@ -50,7 +50,7 @@ All sources are normalized into a shared `CrisisEvent` schema before entering th
 
 ---
 
-## The 9 Agents
+## The 10 Agents
 
 ### 1. Detection Agent
 **File:** [agents.py](agents.py) · **Role:** Gatekeeper
